@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "med-evidence-agentic-rag"
+version = "0.1.0"
+description = "Minimal medical-evidence Agentic RAG demo"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "httpx>=0.28,<1",
+    "numpy>=2,<3",
+    "sentence-transformers>=5,<6",
+    "asyncpg>=0.30,<1",
+    "captcha>=0.7,<0.8",
+    "colorlog>=6.10,<7",
+    "email-validator>=2.3,<3",
+    "fastapi>=0.139,<1",
+    "jieba>=0.42,<1",
+    "langchain>=1.3,<2",
+    "langgraph-checkpoint-postgres>=3.0,<4",
+    "psycopg[binary,pool]>=3.2,<4",
+    "langchain-chroma>=1.1,<2",
+    "langchain-core>=1.3,<2",
+    "langchain-huggingface[full]>=1.2,<2",
+    "langchain-openai>=1.5,<2",
+    "langchain-text-splitters>=1.1,<2",
+    "mineru-open-sdk>=0.2.5,<1",
+    "pydantic>=2.12,<3",
+    "Pillow>=11,<12",
+    "pypdf>=6.16,<7",
+    "python-multipart>=0.0.20,<1",
+    "python-dotenv>=1.2,<2",
+    "PyJWT>=2.11,<3",
+    "redis>=7.2,<8",
+    "rank-bm25>=0.2.2,<1",
+    "sqlalchemy[asyncio]>=2.0,<2.1",
+    "torch==2.6.0",
+    "uvicorn>=0.51,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "aiosqlite>=0.20,<1",
+    "pyright>=1.1.400,<2",
+    "pytest>=8.4,<10",
+    "ruff>=0.12,<1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+medevidence-eval = "med_evidence_agentic_rag.evaluation.__main__:main"
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

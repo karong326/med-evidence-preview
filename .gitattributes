@@ -1,0 +1,2 @@
+# Preserve delivery file bytes and SHA-256 values across Git newline settings.
+* -text
