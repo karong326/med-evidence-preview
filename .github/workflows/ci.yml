@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -47,7 +47,15 @@ jobs:
           MEDEVIDENCE_TEST_POSTGRES_URL: postgresql+asyncpg://test:${{ github.run_id }}@127.0.0.1:5432/test
           MEDEVIDENCE_TEST_REDIS_URL: redis://127.0.0.1:6379/0
           MEDEVIDENCE_TEST_REDIS_CONTAINER: ${{ job.services.redis.id }}
-        run: python -m pytest -q tests
+        run: |
+          # Use the same PostgreSQL major as the disposable service for backup/restore.
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          for tool in pg_dump pg_restore psql; do
+            version=$("/usr/lib/postgresql/16/bin/$tool" --version)
+            printf '%s\n' "$version"
+            [[ "$version" == *"(PostgreSQL) 16."* ]]
+          done
+          python -m pytest -q -rs tests
       - name: Verify public preview content
         run: python scripts/check_preview.py
   frontend:
