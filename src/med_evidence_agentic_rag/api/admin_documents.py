@@ -15,11 +15,13 @@ from med_evidence_agentic_rag.api.documents import (
     SUPPORTED_SUFFIXES,
     UPLOAD_MAX_BYTES,
 )
+from med_evidence_agentic_rag.persistence.operations import journal
 from med_evidence_agentic_rag.rag_creation.base_corpus import (
     BASE_CORPUS_DIRECTORY,
     discover_base_documents,
 )
 from med_evidence_agentic_rag.services.coordination import resources, run_protected
+from med_evidence_agentic_rag.services.paths import scoped_source
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -28,10 +30,10 @@ admin_documents_router = APIRouter(prefix="/api/admin", tags=["管理员"])
 
 def _base_path(filename: str) -> Path:
     """将上传文件名限制在唯一基础资料目录内。"""
-    path = (BASE_CORPUS_DIRECTORY / Path(filename).name).resolve()
-    if path.parent != BASE_CORPUS_DIRECTORY.resolve():
-        raise HTTPException(status_code=400, detail="资料文件名不安全")
-    return path
+    try:
+        return scoped_source(BASE_CORPUS_DIRECTORY, None, filename)
+    except ValueError as error:
+        raise HTTPException(400, "资料文件名不安全") from error
 
 
 @admin_documents_router.get("/base-documents")
@@ -52,7 +54,7 @@ async def upload_base_document(
     if not filename or Path(filename).suffix.lower() not in SUPPORTED_SUFFIXES:
         raise HTTPException(status_code=400, detail="不支持该基础资料格式")
     target = _base_path(filename)
-    lease = resources.acquire(("base-document", target.name.casefold()))
+    lease = await resources.obtain(("base-document", target.name.casefold()))
     return await run_protected(lease, lambda: _upload_base_document(file, target, filename))
 
 
@@ -63,31 +65,39 @@ async def _upload_base_document(
 ) -> dict[str, str | int]:
     if target.exists():
         raise HTTPException(status_code=409, detail="同名基础资料已存在")
+    op = await journal.begin("base-upload", None, None, filename)
+    staging = target.with_name(f".{op.id}.part")
     total = 0
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with target.open("wb") as output:
+        with staging.open("xb") as output:
             while chunk := await file.read(1024 * 1024):
                 total += len(chunk)
                 if total > UPLOAD_MAX_BYTES:
                     output.close()
-                    target.unlink(missing_ok=True)
+                    staging.unlink(missing_ok=True)
                     raise HTTPException(status_code=413, detail="基础资料超过 200MB")
                 output.write(chunk)
     except BaseException:
-        target.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
+        await journal.finish(op.id)
         raise
     if total == 0:
-        target.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
+        await journal.finish(op.id)
         raise HTTPException(status_code=400, detail="基础资料不能为空")
+    staging.replace(target)
+
     try:
         from med_evidence_agentic_rag.rag_creation.ingestion import index_document
 
+        await journal.set_phase(op.id, "indexing")
         chunks = await asyncio.to_thread(index_document, target, "base")
     except Exception as exc:
         target.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="基础资料解析或入库失败") from exc
-    logger.info("管理员基础资料入库完成：文件=%s，切块数=%d", filename, chunks)
+    await journal.finish(op.id)
+    logger.info("Base document indexed: chunks=%d", chunks)
     return {"filename": filename, "chunks": chunks}
 
 
@@ -98,7 +108,7 @@ async def delete_base_document(
 ) -> dict[str, bool]:
     """按真实 source 清理向量，再删除基础资料原文件。"""
     source = _base_path(filename)
-    lease = resources.acquire(("base-document", source.name.casefold()))
+    lease = await resources.obtain(("base-document", source.name.casefold()))
     return await run_protected(lease, lambda: _delete_base_document(source))
 
 
@@ -107,7 +117,9 @@ async def _delete_base_document(source: Path) -> dict[str, bool]:
         raise HTTPException(status_code=404, detail="基础资料不存在")
     from med_evidence_agentic_rag.rag_creation.ingestion import delete_indexed_source
 
+    op = await journal.begin("base-delete", None, None, source.name)
     await asyncio.to_thread(delete_indexed_source, str(source))
     source.unlink()
-    logger.info("管理员基础资料已删除：文件=%s", source.name)
+    await journal.finish(op.id)
+    logger.info("Base document deleted")
     return {"deleted": True}

@@ -19,6 +19,7 @@ from langchain_core.messages import ToolMessage
 
 from med_evidence_agentic_rag.rag_retrieval.models import RetrievalResult
 from med_evidence_agentic_rag.tools.rewrite_queries import QueryPlan
+from med_evidence_agentic_rag.utils.config import agent_recursion_limit
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger("med_evidence_agentic_rag.agent.agent")
@@ -190,14 +191,17 @@ async def stream_chat(
         }
 
     # 服务端日志只保留运行元数据；问题正文仍通过本轮受控执行轨迹返回给当前用户。
-    logger.info("[问答开始] 会话=%s", conversation_id)
+    logger.info("Agent turn started")
     yield trace("question_received", "接收问题", question)
     input_question = agent_input or question
 
     # ==========================================================================================
     async for event in active_agent.astream(
         {"messages": [{"role": "user", "content": input_question}]},
-        config={"configurable": {"thread_id": str(conversation_id)}},
+        config={
+            "configurable": {"thread_id": str(conversation_id)},
+            "recursion_limit": agent_recursion_limit,
+        },
         context={
             "user_id": str(user_id) if user_id is not None else "",
             "turn_number": turn_number,
@@ -390,8 +394,7 @@ async def stream_chat(
                     f"{chr(ord('A') + index)}：{query}" for index, query in enumerate(plan.queries)
                 )
                 logger.info(
-                    "[Agent 状态] 查询规划已完成：模式=%s，查询数=%d，是否回退=%s",
-                    plan.mode,
+                    "Query planning completed: queries=%d fallback=%s",
                     len(plan.queries),
                     plan.fallback,
                 )
@@ -419,7 +422,7 @@ async def stream_chat(
                 )
                 continue
             if tool_name and tool_name != "search_knowledge":
-                logger.info("[Agent 工具] %s 执行完成", tool_name)
+                logger.info("Agent tool completed")
                 yield trace(
                     "tool_complete",
                     "工具执行完成",
@@ -440,11 +443,7 @@ async def stream_chat(
                     "调用知识库工具",
                     f"原生名称：search_knowledge；检索问题：{result.query}",
                 )
-            logger.info(
-                "[Agent 状态] 已调用知识库工具：检索问题=%s，证据数=%d",
-                result.query,
-                len(result.evidences),
-            )
+            logger.info("Knowledge tool completed: evidence=%d", len(result.evidences))
             citations = "、".join(item.citation_id for item in result.evidences) or "无"
             yield trace(
                 "knowledge_complete",
@@ -479,10 +478,7 @@ async def stream_chat(
     if not knowledge_called:
         other_tools = [name for name in dict.fromkeys(called_tools) if name != "search_knowledge"]
         if other_tools:
-            logger.info(
-                "[Agent 状态] 本轮未检索知识库，已调用其他工具：%s",
-                "、".join(other_tools),
-            )
+            logger.info("Agent completed without knowledge retrieval; other tools ran")
         else:
             logger.info("[Agent 状态] 本轮未调用工具，由模型直接回答")
     elapsed_seconds = perf_counter() - started_at

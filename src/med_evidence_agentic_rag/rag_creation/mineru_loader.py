@@ -95,11 +95,7 @@ class MinerUClient:
         if page_count <= self.MAX_PDF_PAGES:
             return [_PreparedFile(source=source, upload=source, part_number=1)]
 
-        logger.info(
-            "_prepare_file: PDF 超过 MinerU 单次页数限制，开始临时拆分：文件=%s，页数=%d",
-            source.name,
-            page_count,
-        )
+        logger.info("Splitting PDF for MinerU: pages=%d", page_count)
         # 只拆分超限文件，避免 322 页原文被 MinerU 直接拒绝。
         prepared_files: list[_PreparedFile] = []
         for start in range(0, page_count, self.MAX_PDF_PAGES):
@@ -115,9 +111,7 @@ class MinerUClient:
                 _PreparedFile(source=source, upload=upload, part_number=part_number)
             )
 
-        logger.info(
-            "_prepare_file: PDF 临时拆分完成：文件=%s，分段数=%d", source.name, len(prepared_files)
-        )
+        logger.info("PDF split for MinerU: parts=%d", len(prepared_files))
         return prepared_files
 
     def _parse_batch(
@@ -134,9 +128,7 @@ class MinerUClient:
             raise ValueError("_parse_batch: 同一批次存在同名文件，无法可靠对应 MinerU 结果")
 
         upload_paths = [str(prepared.upload) for prepared in prepared_files]
-        logger.info(
-            "_parse_batch: MinerU 批量解析开始：模型=%s，文件数=%d", model, len(upload_paths)
-        )
+        logger.info("MinerU batch started: files=%d", len(upload_paths))
 
         received: set[str] = set()
         # SDK 会在各文件完成时依次产出结果。
@@ -161,11 +153,7 @@ class MinerUClient:
 
             # 同时，对服务端明确提示“稍后重试”的临时错误单独重试一次。
             if result.state != "done" and "try again later" in (result.error or "").lower():
-                logger.warning(
-                    "_parse_batch: MinerU 批量解析暂时失败，单独重试一次：文件=%s，分段=%d",
-                    prepared.source.name,
-                    prepared.part_number,
-                )
+                logger.warning("MinerU temporary failure; retrying one part")
                 result = client.extract(
                     str(prepared.upload),
                     model=model,
@@ -182,12 +170,7 @@ class MinerUClient:
 
             # 按原始文件和分段序号保存，稍后统一拼接。
             markdown_parts[prepared.source][prepared.part_number] = result.markdown
-            logger.info(
-                "_parse_batch: MinerU 解析完成：文件=%s，分段=%d，字符数=%d",
-                prepared.source.name,
-                prepared.part_number,
-                len(result.markdown),
-            )
+            logger.info("MinerU part parsed")
 
         missing = set(by_filename) - received
         # 只要有文件没有结果，整个批次就不算完整成功

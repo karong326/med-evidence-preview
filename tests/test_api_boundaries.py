@@ -85,7 +85,7 @@ def test_wrong_access_code_and_normal_user_admin_boundary(api, monkeypatch):
     assert response.json()["role"] == "admin"
 
 
-def test_history_and_delete_keep_owner_and_checkpoint_boundary(api, monkeypatch):
+def test_history_and_delete_keep_owner_and_checkpoint_boundary(api, monkeypatch, isolated_journal):
     client, headers, user_id, app = api
     conversation_id = uuid4()
     history = AsyncMock(return_value=None)

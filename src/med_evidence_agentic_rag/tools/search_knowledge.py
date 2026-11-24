@@ -6,7 +6,6 @@
 """
 
 import json
-from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
 
@@ -16,6 +15,7 @@ from langchain_core.tools import tool
 from med_evidence_agentic_rag.agent.context import UserContext
 from med_evidence_agentic_rag.rag_retrieval.models import Evidence, RetrievalResult
 from med_evidence_agentic_rag.rag_retrieval.reranker import retrieve_with_rerank as retrieve
+from med_evidence_agentic_rag.services.coordination import run_stream_worker
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -43,7 +43,7 @@ def _current_query_index(runtime: ToolRuntime[UserContext, dict[str, Any]]) -> i
 
 # Agent 的唯一 RAG Tool：
 @tool
-def search_knowledge(
+async def search_knowledge(
     query: str,
     runtime: ToolRuntime[UserContext, dict[str, Any]],
 ) -> str:
@@ -74,7 +74,7 @@ def search_knowledge(
     evidences: list[Evidence] = []
 
     # ！！！进入整个检索流程，最后返回检索结果：
-    result = retrieve(normalized_query, user_id=user_id)
+    result = await run_stream_worker(lambda: retrieve(normalized_query, user_id=user_id))
     # 进入retrieve()方法，也就是完整的流程：
     # → Dense Top x
     # → BM25 Top x
@@ -97,13 +97,6 @@ def search_knowledge(
             }
         )
         evidences.append(final_evidence)
-        logger.info(
-            "[证据 %s] 分数=%.4f，来源=%s，原文内容：此处省略\n",
-            final_evidence.citation_id,
-            final_evidence.score,
-            Path(final_evidence.source).name,
-            # final_evidence.content,
-        )
 
     # 重新整理后的工具结果：
     result = RetrievalResult(
@@ -111,7 +104,7 @@ def search_knowledge(
         found=bool(evidences),
         evidences=evidences,
     )
-    logger.info("知识库工具已执行：查询=%s，证据数=%d", normalized_query, len(evidences))
+    logger.info("Knowledge retrieval completed: evidence=%d", len(evidences))
 
     # ！！！然后 Tool 最终return返回统一 JSON 的示例如下：
     # {

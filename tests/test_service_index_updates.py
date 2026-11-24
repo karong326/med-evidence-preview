@@ -9,7 +9,7 @@ from unittest.mock import patch
 import numpy as np
 
 
-def load_bm25_with_store(store):
+def load_bm25_with_store(store, monkeypatch):
     # Avoid initializing a real Chroma client or GPU in the index lifecycle test.
     __import__("sentence_transformers")
     import med_evidence_agentic_rag.rag_retrieval as package
@@ -17,20 +17,21 @@ def load_bm25_with_store(store):
     path = Path(package.__file__).parent / "bm25.py"
     spec = importlib.util.spec_from_file_location("bm25_update_test", path)
     module = importlib.util.module_from_spec(spec)
-    with patch.dict(
+    monkeypatch.setitem(
         sys.modules,
-        {"med_evidence_agentic_rag.models_and_database.chroma": SimpleNamespace(vectorstore=store)},
-    ):
-        spec.loader.exec_module(module)
+        "med_evidence_agentic_rag.models_and_database.chroma",
+        SimpleNamespace(vectorstore=store),
+    )
+    spec.loader.exec_module(module)
     return module
 
 
-def test_invalidation_during_scoring_keeps_request_documents_aligned():
+def test_invalidation_during_scoring_keeps_request_documents_aligned(monkeypatch):
     stored = {
         "documents": ["hospital infection", "sun moon", "rain wind"],
         "metadatas": [{"source": name, "source_type": "base"} for name in ["a", "b", "c"]],
     }
-    module = load_bm25_with_store(SimpleNamespace(get=lambda **kwargs: stored))
+    module = load_bm25_with_store(SimpleNamespace(get=lambda **kwargs: stored), monkeypatch)
     module._ensure_bm25_index()
     original = module._bm25.get_scores
 

@@ -12,8 +12,10 @@ from med_evidence_agentic_rag.services.email_approval import EmailApprovalRegist
 from med_evidence_agentic_rag.tools import send_email as mail
 
 
-def test_agent_tool_only_proposes_and_page_confirmation_sends_owner_payload(monkeypatch):
-    registry = EmailApprovalRegistry()
+def test_agent_tool_only_proposes_and_page_confirmation_sends_owner_payload(
+    monkeypatch, email_sessions
+):
+    registry = EmailApprovalRegistry(email_sessions)
     monkeypatch.setattr(mail, "email_approvals", registry)
     monkeypatch.setattr(email_actions, "email_approvals", registry)
     monkeypatch.setattr(mail, "resolve_email_recipient", AsyncMock(return_value="test@example.org"))
@@ -38,11 +40,11 @@ def test_agent_tool_only_proposes_and_page_confirmation_sends_owner_payload(monk
         assert len(sends) == 1
 
 
-def test_email_confirmation_does_not_accept_foreign_owner_or_payload(monkeypatch):
-    registry = EmailApprovalRegistry()
+def test_email_confirmation_does_not_accept_foreign_owner_or_payload(monkeypatch, email_sessions):
+    registry = EmailApprovalRegistry(email_sessions)
     monkeypatch.setattr(email_actions, "email_approvals", registry)
     owner, other = uuid4(), uuid4()
-    action = registry.propose(owner, uuid4(), "test@example.org", "subject", "body")
+    action = asyncio.run(registry.propose(owner, uuid4(), "test@example.org", "subject", "body"))
     app = FastAPI()
     app.include_router(email_actions.email_actions_router)
     app.dependency_overrides[require_user] = lambda: AuthenticatedUser(other, "other@example.org")

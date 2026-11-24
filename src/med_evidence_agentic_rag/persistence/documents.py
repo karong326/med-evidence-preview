@@ -7,12 +7,38 @@
 document_deletion 服务按安全顺序协调。
 """
 
+from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from med_evidence_agentic_rag.models_and_database.postgres import AsyncSessionLocal
 from med_evidence_agentic_rag.persistence.postgres_tables import DocumentRecord, utc_now
+
+
+async def source_is_registered(
+    session: AsyncSession,
+    owner: UUID,
+    source: Path,
+    *,
+    excluding: UUID | None = None,
+    match_filename: bool = False,
+) -> bool:
+    """Check for a registered file entry and optionally for its canonical upload name."""
+    candidates = await session.execute(
+        select(DocumentRecord.filename, DocumentRecord.source_path).where(
+            DocumentRecord.owner_user_id == owner,
+            DocumentRecord.id.is_distinct_from(excluding),
+        )
+    )
+    # Compare resolved spellings to respect case-sensitive directories even on Windows.
+    resolved_source = str(source.resolve())
+    return any(
+        (match_filename and filename.casefold() == source.name.casefold())
+        or str(Path(registered).resolve()) == resolved_source
+        for filename, registered in candidates
+    )
 
 
 # 资料状态变化：
@@ -25,11 +51,12 @@ from med_evidence_agentic_rag.persistence.postgres_tables import DocumentRecord,
 # ├── 删除成功：登记记录消失
 # └── 删除失败：delete_failed
 async def create_document(
-    *, owner_user_id: UUID, filename: str, source_path: str
+    *, owner_user_id: UUID, filename: str, source_path: str, document_id: UUID | None = None
 ) -> DocumentRecord:
     """先登记待处理资料，使解析失败也有明确状态。"""
     async with AsyncSessionLocal() as session:
         record = DocumentRecord(
+            id=document_id,
             owner_user_id=owner_user_id,
             filename=filename,
             source_path=source_path,

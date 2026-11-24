@@ -4,6 +4,7 @@ import asyncio
 import copy
 import math
 import platform
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from statistics import mean
@@ -12,13 +13,13 @@ from typing import Any, cast
 
 import httpx
 
-from .adapters import Adapter, CleanupFailure, ReplayAdapter
+from .adapters import Adapter, CleanupFailure, ReplayAdapter, RetrievalAdapter
 from .judges import Judge
 from .metrics import score_case
 from .schemas import Case, JudgeScores, Observation, ReportRow, RunConfig, fingerprint
 
 
-def _quantile(values: list[float], q: float) -> float | None:
+def quantile(values: list[float], q: float) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
@@ -40,10 +41,10 @@ def _aggregate(rows: list[dict[str, Any]], elapsed: float) -> dict[str, float | 
     ttfts = [row['ttft_seconds'] for row in rows if row['ttft_seconds'] is not None]
     summary.update({'count': float(len(rows)),
                     'error_rate': sum(row['error'] is not None for row in rows) / len(rows),
-                    'p50_seconds': _quantile(times, 0.5),
-                    'p95_seconds': _quantile(times, 0.95),
-                    'ttft_p50_seconds': _quantile(ttfts, 0.5),
-                    'ttft_p95_seconds': _quantile(ttfts, 0.95),
+                    'p50_seconds': quantile(times, 0.5),
+                    'p95_seconds': quantile(times, 0.95),
+                    'ttft_p50_seconds': quantile(ttfts, 0.5),
+                    'ttft_p95_seconds': quantile(ttfts, 0.95),
                     'throughput_per_second': len(rows) / elapsed if elapsed else None})
     for field in ('input_tokens', 'output_tokens', 'cost_usd',
                   'judge_input_tokens', 'judge_output_tokens', 'judge_cost_usd'):
@@ -112,8 +113,11 @@ async def run(cases: list[Case], adapter: Adapter, config: RunConfig,
             return row
 
     start = perf_counter()
-    rows = await asyncio.gather(*(one(case, repeat) for repeat in range(config.repeats)
-                                  for case in cases))
+    scope = adapter.index_scope() if isinstance(adapter, RetrievalAdapter) else nullcontext()
+    async with scope, asyncio.TaskGroup() as group:
+        tasks = [group.create_task(one(case, repeat)) for repeat in range(config.repeats)
+                 for case in cases]
+    rows = [task.result() for task in tasks]
     elapsed = perf_counter() - start
     try:
         package_version = version('med-evidence-agentic-rag')

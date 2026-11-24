@@ -66,7 +66,7 @@ def test_http_ndjson_partial_evidence_and_cleanup(terminal, error):
     assert result.error == error
     assert result.answer == 'partial [E1]'
     assert result.cited_ids == ['E1']
-    assert result.tools == ['search_knowledge']
+    assert result.tools == (['search_knowledge'] if terminal == 'done' else None)
     assert result.evidence_contexts == ['c']
     assert result.ttft_seconds is not None
     assert requests[-1][0] == 'DELETE'

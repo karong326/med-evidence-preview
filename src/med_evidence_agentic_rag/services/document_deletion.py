@@ -30,7 +30,9 @@ class DocumentDeletionError(RuntimeError):
     """资料清理未完成，但可由相同请求安全重试。"""
 
 
-async def delete_document_assets(record: DocumentRecord, *, upload_root: Path) -> None:
+async def delete_document_assets(
+    record: DocumentRecord, *, upload_root: Path, remove_source: bool = True
+) -> None:
     """依次物理清理向量、源文件和 PostgreSQL 登记。"""
     source = Path(record.source_path).resolve()
     root = upload_root.resolve()
@@ -46,7 +48,8 @@ async def delete_document_assets(record: DocumentRecord, *, upload_root: Path) -
 
     try:
         await asyncio.to_thread(delete_indexed_document, str(record.id))
-        source.unlink(missing_ok=True)
+        if remove_source:
+            source.unlink(missing_ok=True)
         await delete_document_record(record.id)
     except Exception as exc:
         await mark_document_delete_failed(record.id)

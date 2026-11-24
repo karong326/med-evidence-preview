@@ -8,6 +8,8 @@
 import json
 import os
 import smtplib
+import ssl
+from contextlib import suppress
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
@@ -20,16 +22,25 @@ from med_evidence_agentic_rag.agent.context import UserContext
 from med_evidence_agentic_rag.persistence.user_preferences import (
     resolve_email_recipient,
 )
-from med_evidence_agentic_rag.services.email_approval import email_approvals
+from med_evidence_agentic_rag.services.email_approval import DeliveryRejected, email_approvals
+from med_evidence_agentic_rag.utils.config import integer_setting
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
-SMTP_SERVER = "smtp.qq.com"
-SMTP_PORT = 465
 
 
-class EmailRecipientError(ValueError):
+def smtp_configured() -> bool:
+    return bool(os.getenv("MY_SENDER_EMAIL")) and (
+        os.getenv("SMTP_TRANSPORT") == "plain" or bool(os.getenv("MY_SENDER_PASSWORD"))
+    )
+
+
+class EmailRecipientError(DeliveryRejected):
     """SMTP 已确认收件邮箱不存在或不可投递。"""
+
+
+class DeliveryUncertain(RuntimeError):
+    """SMTP acceptance could not be established."""
 
 
 def send_email(
@@ -38,7 +49,7 @@ def send_email(
     email_content: str,
     is_html: bool = False,
 ) -> bool:
-    """通过 QQ SMTP 发送一封纯文本或 HTML 邮件。
+    """通过配置的 SMTP 服务发送一封纯文本或 HTML 邮件。
 
     Args:
         recipient: 收件人邮箱地址。
@@ -46,17 +57,19 @@ def send_email(
         email_content: 邮件正文。
         is_html: 是否按 HTML 格式发送正文。
     Returns:
-        邮件已被 SMTP 服务接受时为 True；配置、认证或其他 SMTP 错误时为 False。
+        SMTP 服务接受时为 True；配置、认证或明确拒绝时为 False。
     Raises:
+        DeliveryUncertain: 提交过程中连接中断，结果未知。
         EmailRecipientError: SMTP 明确返回收件邮箱不存在或无法投递。
     Side effects:
-        连接 QQ SMTP 并真实发送邮件。
+        连接配置的 SMTP 服务并真实发送邮件。
     """
     # 凭证在调用时读取，缺失配置不会导致模块导入失败。
-    sender_email = os.getenv("MY_SENDER_EMAIL")
+    sender_email = os.getenv("MY_SENDER_EMAIL", "")
     sender_password = os.getenv("MY_SENDER_PASSWORD")
-    if not sender_email or not sender_password:
-        logger.error("邮件发送失败：未配置 MY_SENDER_EMAIL 或 MY_SENDER_PASSWORD")
+    transport = os.getenv("SMTP_TRANSPORT", "ssl")
+    if not smtp_configured() or transport not in {"ssl", "starttls", "plain"}:
+        logger.error("SMTP configuration is missing or invalid")
         return False
 
     # 根据 is_html 选择正文类型，其余 SMTP 参数保持统一。
@@ -66,27 +79,52 @@ def send_email(
     message["Subject"] = email_subject
     message.attach(MIMEText(email_content, "html" if is_html else "plain", "utf-8"))
 
+    submitted = False
     try:
-        with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
+        port = integer_setting("SMTP_PORT", 465 if transport == "ssl" else 587, 1, 65535)
+        host = os.getenv("SMTP_HOST", "smtp.qq.com")
+        if not host or (transport == "plain" and not os.getenv("SMTP_HOST")):
+            return False
+        server = (
+            smtplib.SMTP_SSL(host, port, timeout=15, context=ssl.create_default_context())
+            if transport == "ssl" else smtplib.SMTP(host, port, timeout=15)
+        )
+    except Exception:
+        return False
+    try:
+        if transport == "starttls":
+            server.starttls(context=ssl.create_default_context())
+        if transport != "plain" and sender_password is not None:
             server.login(sender_email, sender_password)
-            server.sendmail(sender_email, [recipient], message.as_string())
+        payload = message.as_string()
+        submitted = True
+        server.sendmail(sender_email, [recipient], payload)
+    except smtplib.SMTPSenderRefused:
+        return False
     except smtplib.SMTPDataError as exc:
         if exc.smtp_code == 550:
-            logger.warning("邮件发送失败：收件邮箱不存在或无法投递：%s", recipient)
+            logger.warning("邮件发送失败：收件邮箱不存在或无法投递")
             raise EmailRecipientError("收件邮箱不存在或无法投递，请检查邮箱地址") from exc
         logger.error("邮件发送失败：SMTP 数据错误，代码=%s", exc.smtp_code)
         return False
     except smtplib.SMTPRecipientsRefused as exc:
-        logger.warning("邮件发送失败：收件邮箱被服务器拒绝：%s", recipient)
+        logger.warning("邮件发送失败：收件邮箱被服务器拒绝")
         raise EmailRecipientError("收件邮箱不存在或无法投递，请检查邮箱地址") from exc
     except smtplib.SMTPAuthenticationError:
         logger.error("邮件发送失败：SMTP 认证未通过")
         return False
     except Exception:
-        logger.exception("邮件发送失败")
-        return False
+        if not submitted:
+            return False
+        raise DeliveryUncertain("无法确认 SMTP 服务是否接受了邮件") from None
+    finally:
+        # QUIT can fail after any DATA or envelope response. Preserve that outcome.
+        with suppress(Exception):
+            server.quit()
+        with suppress(Exception):
+            server.close()
 
-    logger.info("邮件发送成功：收件人=%s，主题=%s", recipient, email_subject)
+    logger.info("SMTP 服务已接受邮件")
     return True
 
 
@@ -119,7 +157,7 @@ async def send_email_tool(
     raw_conversation = runtime.context.get("conversation_id")
     if not raw_conversation:
         raise ValueError("邮件草稿需要有效会话")
-    action = email_approvals.propose(
+    action = await email_approvals.propose(
         UUID(raw_user_id),
         UUID(raw_conversation),
         resolved_recipient,

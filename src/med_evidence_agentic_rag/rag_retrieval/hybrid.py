@@ -44,17 +44,5 @@ def retrieve_hybrid(
     results.append(retrieve_multilingual(normalized_query, top_k=candidate_k, user_id=user_id))
     fused = fuse_results(normalized_query, results, top_k=top_k, rrf_k=rrf_k)
 
-    logger.info(
-        "[RRF 融合] 问题=%s，Dense=%d，BM25=%d，多语言=%d，融合候选=%d",
-        normalized_query,
-        len(results[0].evidences),
-        len(results[1].evidences),
-        len(results[2].evidences),
-        len(fused.evidences),
-    )
+    logger.info("RRF completed: candidates=%d", len(fused.evidences))
     return fused
-
-
-if __name__ == "__main__":
-    result = retrieve_hybrid("医院感染暴发 12小时")
-    logger.info("混合检索独立测试完成：是否命中=%s，证据数=%d", result.found, len(result.evidences))

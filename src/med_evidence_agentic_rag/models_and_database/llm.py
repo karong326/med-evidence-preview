@@ -7,21 +7,21 @@
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from med_evidence_agentic_rag.utils.config import llm_api_key, llm_base_url, llm_model_name
-from med_evidence_agentic_rag.utils.logger import setup_logger
-
-logger = setup_logger(__name__)
+from med_evidence_agentic_rag.utils.config import (
+    llm_api_key,
+    llm_base_url,
+    llm_max_retries,
+    llm_model_name,
+    llm_timeout_seconds,
+)
 
 # 全项目复用同一个支持流式输出的聊天模型实例。
 llm = ChatOpenAI(
     model=llm_model_name,
     api_key=SecretStr(llm_api_key),
     base_url=llm_base_url,
+    timeout=llm_timeout_seconds,
+    max_retries=llm_max_retries,
     temperature=0.5,
     streaming=True,
 )
-
-
-if __name__ == "__main__":
-    response = llm.invoke("你是谁？进行简洁自我介绍。")
-    logger.info("大语言模型调用成功：%s", response.content)

@@ -15,8 +15,11 @@ def checker():
 def test_empty_config_reports_required_settings_without_loading_models(tmp_path):
     issues = checker().validate_configuration({}, tmp_path)
     assert any("LLM_MODEL_NAME" in issue for issue in issues)
-    assert any("CHROMA_PERSIST_DIRECTORY" in issue for issue in issues)
     assert any("JWT_SECRET_KEY" in issue for issue in issues)
+    assert any(
+        "DATA_ROOT" in issue
+        for issue in checker().validate_configuration({"DATA_ROOT": "relative"}, tmp_path)
+    )
 
 
 def test_valid_config_and_missing_optional_model(tmp_path):

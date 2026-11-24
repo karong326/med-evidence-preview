@@ -7,22 +7,29 @@
 删除用户及其剩余上传目录。批量清空逐个复用相同删除链，避免两套清理逻辑漂移。
 """
 
-import shutil
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from med_evidence_agentic_rag.api.auth import AuthenticatedUser, require_admin
 from med_evidence_agentic_rag.api.documents import UPLOAD_DIRECTORY
 from med_evidence_agentic_rag.models_and_database.postgres import AsyncSessionLocal
+from med_evidence_agentic_rag.models_and_database.postgres_checkpointer import open_checkpointer
+from med_evidence_agentic_rag.persistence.operations import journal
 from med_evidence_agentic_rag.persistence.postgres_tables import (
     Conversation,
-    DocumentRecord,
     User,
 )
-from med_evidence_agentic_rag.services.document_deletion import delete_document_assets
+from med_evidence_agentic_rag.rag_creation.ingestion import delete_indexed_document
+from med_evidence_agentic_rag.services.coordination import resources, run_protected
+from med_evidence_agentic_rag.services.recovery import remove_account
 from med_evidence_agentic_rag.utils.logger import setup_logger
+
+
+def delete_vectors(selector: tuple[str, str]) -> None:
+    delete_indexed_document(selector[1])
+
 
 logger = setup_logger(__name__)
 admin_access_users_router = APIRouter(prefix="/api/admin", tags=["管理员"])
@@ -38,40 +45,24 @@ admin_access_users_router = APIRouter(prefix="/api/admin", tags=["管理员"])
 #   → 清理残留上传目录
 async def _delete_access_user(user_id: UUID) -> bool:
     """删除一位访问令牌用户的会话、检查点、上传资料和账号。"""
-    async with AsyncSessionLocal() as session:
-        user = await session.scalar(
-            select(User).where(User.id == user_id, User.auth_type == "access_token")
-        )
-        if user is None:
+    lease = await resources.obtain(("owner-delete", str(user_id)))
+
+    async def erase() -> bool:
+        async with AsyncSessionLocal() as session:
+            exists = await session.scalar(
+                select(User.id).where(User.id == user_id, User.auth_type == "access_token")
+            )
+        if not exists:
             return False
-        conversation_ids = [
-            str(value)
-            for value in await session.scalars(
-                select(Conversation.id).where(Conversation.user_id == user_id)
+        op = await journal.begin("owner-delete", user_id, None, "")
+        async with open_checkpointer() as saver:
+            await remove_account(
+                user_id, UPLOAD_DIRECTORY, journal, delete_vectors, saver.adelete_thread
             )
-        ]
-        documents = list(
-            await session.scalars(
-                select(DocumentRecord).where(DocumentRecord.owner_user_id == user_id)
-            )
-        )
-        for record in documents:
-            await delete_document_assets(
-                record,
-                upload_root=UPLOAD_DIRECTORY / str(user_id),
-            )
-        for conversation_id in conversation_ids:
-            for table in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
-                await session.execute(
-                    text(f"DELETE FROM {table} WHERE thread_id = :thread_id"),
-                    {"thread_id": conversation_id},
-                )
-        await session.delete(user)
-        await session.commit()
-    upload_directory = (UPLOAD_DIRECTORY / str(user_id)).resolve()
-    if upload_directory.is_dir():
-        shutil.rmtree(upload_directory)
-    return True
+        await journal.finish(op.id)
+        return True
+
+    return await run_protected(lease, erase)
 
 
 @admin_access_users_router.get("/access-users")
@@ -107,7 +98,7 @@ async def delete_access_user(
     """干净删除指定访问令牌用户的全部项目数据。"""
     if not await _delete_access_user(user_id):
         raise HTTPException(status_code=404, detail="访问令牌用户不存在")
-    logger.info("管理员已删除访问令牌用户：%s", user_id)
+    logger.info("Administrator deleted an access-code user")
     return {"deleted": True}
 
 

@@ -53,7 +53,7 @@ async def get_user_personalization(user_id: UUID) -> tuple[str | None, dict[str,
 async def save_user_name(user_id: UUID, name: str) -> User:
     """保存用户明确提供的称呼。"""
     async with AsyncSessionLocal() as session:
-        user = await session.get(User, user_id)
+        user = await session.get(User, user_id, with_for_update=True)
         if user is None:
             raise LookupError("用户不存在")
         memory = _memory_from_user(user)
@@ -67,7 +67,7 @@ async def save_user_name(user_id: UUID, name: str) -> User:
 async def save_user_contact(user_id: UUID, contact_name: str, email: str) -> User:
     """保存用户明确指定的联系人别名与邮箱。"""
     async with AsyncSessionLocal() as session:
-        user = await session.get(User, user_id)
+        user = await session.get(User, user_id, with_for_update=True)
         if user is None:
             raise LookupError("用户不存在")
         memory = _memory_from_user(user)

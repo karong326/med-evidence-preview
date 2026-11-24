@@ -36,6 +36,7 @@ class Base(DeclarativeBase):
 # │   └── ChatTurn
 # └── DocumentRecord
 
+
 class User(Base):
     """邮箱或访问令牌登录的普通用户。"""
 
@@ -138,3 +139,46 @@ class ChatTurn(Base):
     answer_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     conversation: Mapped[Conversation] = relationship(back_populates="turns")
+
+
+class EmailActionRecord(Base):
+    __tablename__ = "email_actions"
+    __table_args__ = (
+        Index("ix_email_actions_owner_conversation", "owner_id", "conversation_id"),
+        Index("ix_email_actions_status_updated", "status", "updated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    owner_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    recipient: Mapped[str] = mapped_column(String(320))
+    subject: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str] = mapped_column(Text)
+    is_html: Mapped[bool]
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20))
+    claim_id: Mapped[UUID | None] = mapped_column(Uuid)
+    failure_code: Mapped[str | None] = mapped_column(String(50))
+
+
+class Operation(Base):
+    """Intents survive deletion of their owner and reserve the source until resolved."""
+
+    __tablename__ = "operations"
+    __table_args__ = (Index("ix_operations_pending", "status", "updated_at"),)
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    kind: Mapped[str] = mapped_column(String(30))
+    owner_id: Mapped[UUID | None] = mapped_column(Uuid)
+    resource_id: Mapped[UUID | None] = mapped_column(Uuid)
+    filename: Mapped[str] = mapped_column(String(255))
+    reservation: Mapped[str | None] = mapped_column(String(64), unique=True)
+    phase: Mapped[str] = mapped_column(String(30), default="intent")
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(default=0)
+    error_code: Mapped[str | None] = mapped_column(String(50))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

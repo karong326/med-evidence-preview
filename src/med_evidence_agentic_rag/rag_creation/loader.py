@@ -12,11 +12,8 @@ from unicodedata import category
 from langchain_core.documents import Document
 
 from med_evidence_agentic_rag.rag_creation.mineru_loader import MinerUClient
-from med_evidence_agentic_rag.utils.config import (
-    PROJECT_ROOT,
-    mineru_token,
-)
-from med_evidence_agentic_rag.utils.logger import setup_logger
+from med_evidence_agentic_rag.utils.config import mineru_token
+from med_evidence_agentic_rag.utils.logger import configure_server_logging, setup_logger
 
 logger = setup_logger(__name__)
 
@@ -61,7 +58,7 @@ class DocumentLoader:
         documents = [
             Document(page_content=_clean_content(content), metadata={"source": str(self.file_path)})
         ]
-        logger.info("文档加载完成：%s，文档数=%d", self.file_path.name, len(documents))
+        logger.info("Document loaded: count=%d", len(documents))
         return documents
 
     @classmethod
@@ -101,11 +98,14 @@ class DocumentLoader:
 
 
 if __name__ == "__main__":
-    sample = (
-        PROJECT_ROOT
-        / "data"
-        / "raw"
-        / ("CDC_Hospital_Antibiotic_Stewardship_Core_Elements_2019.pdf")
-    )
-    documents = DocumentLoader(sample).load()
-    logger.info("独立测试成功：%s，文档数=%d", sample.name, len(documents))
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Parse an explicitly selected source document")
+    parser.add_argument("source", type=Path)
+    args = parser.parse_args()
+    configure_server_logging()
+    try:
+        DocumentLoader(args.source).load()
+    except Exception:
+        logger.exception("Document loader check failed")
+        raise SystemExit(1) from None

@@ -6,6 +6,7 @@
 
 from langchain_chroma import Chroma
 
+from med_evidence_agentic_rag.models_and_database.chroma_client import persistent_client
 from med_evidence_agentic_rag.models_and_database.embedding import embeddings
 from med_evidence_agentic_rag.utils.config import chroma_collection_name, chroma_persist_directory
 from med_evidence_agentic_rag.utils.logger import setup_logger
@@ -16,9 +17,9 @@ logger = setup_logger(__name__)
 vectorstore = Chroma(
     collection_name=chroma_collection_name,
     embedding_function=embeddings,
-    persist_directory=str(chroma_persist_directory),
+    client=persistent_client(chroma_persist_directory),
 )
-logger.info("向量数据库已加载：%s", chroma_persist_directory)
+logger.info("Chroma index loaded")
 
 
 if __name__ == "__main__":

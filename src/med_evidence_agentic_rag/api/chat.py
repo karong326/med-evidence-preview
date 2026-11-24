@@ -29,12 +29,17 @@ from med_evidence_agentic_rag.persistence.conversations import (
     list_recent_completed_turns,
     mark_chat_turn_failed,
 )
+from med_evidence_agentic_rag.persistence.operations import journal
 from med_evidence_agentic_rag.persistence.user_preferences import get_user_personalization
-from med_evidence_agentic_rag.services.chat_stream import encode_chat_stream
+from med_evidence_agentic_rag.services.chat_stream import StreamDeadline, encode_chat_stream
 from med_evidence_agentic_rag.services.coordination import (
     LeasedStreamingResponse,
     resources,
     start_protected,
+)
+from med_evidence_agentic_rag.utils.config import (
+    agent_turn_deadline_seconds,
+    max_question_characters,
 )
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
@@ -45,7 +50,9 @@ chat_router = APIRouter()
 class AskRequest(BaseModel):
     """一次问答所需的原始问题与所属会话。"""
 
-    question: str = Field(min_length=1, description="用户的医学问题")
+    question: str = Field(
+        min_length=1, max_length=max_question_characters, description="用户的医学问题"
+    )
     conversation_id: UUID
 
 
@@ -62,11 +69,13 @@ async def ask(
     if conversation is None:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    lease = resources.acquire(
+    lease = await resources.obtain(
         ("conversation", str(current_user.id), str(request_body.conversation_id))
     )
     lease_transferred = False
     try:
+        if await journal.conversation_deleting(request_body.conversation_id):
+            raise HTTPException(409, "Conversation deletion awaits reconciliation")
         if await get_owned_conversation(current_user.id, request_body.conversation_id) is None:
             raise HTTPException(status_code=404, detail="会话不存在")
         # 2. 读取最近三轮正常问答:
@@ -110,9 +119,7 @@ async def ask(
                         failure_message="客户端连接已断开，请重试。",
                     )
                 except Exception:
-                    logger.exception(
-                        "取消请求的记录收尾失败：会话=%s", request_body.conversation_id
-                    )
+                    logger.exception("Abandoned turn finalization failed")
 
             cleanup = start_protected(lease, finalize_abandoned_creation)
             await asyncio.shield(cleanup)
@@ -120,17 +127,17 @@ async def ask(
 
         # 7. 选择正式 Agent：
         chat_agent: Any = getattr(request.app.state, "chat_agent", default_agent)
-        logger.info(
-            "收到智能体问答请求：用户邮箱=%s，会话编号=%s",
-            current_user.email,
-            request_body.conversation_id,
-        )
+        logger.info("Accepted chat turn")
+        deadline = StreamDeadline(asyncio.get_running_loop().time() + agent_turn_deadline_seconds)
 
         async def mark_unstarted() -> None:
+            timed_out = deadline.transport_expired
             await mark_chat_turn_failed(
                 turn.id,
-                failure_code="client_disconnected",
-                failure_message="客户端连接已断开，请重试。",
+                failure_code="service_timeout" if timed_out else "client_disconnected",
+                failure_message=(
+                    "服务响应超时，请稍后重试。" if timed_out else "客户端连接已断开，请重试。"
+                ),
             )
 
         # 8. 返回流式响应：
@@ -147,12 +154,14 @@ async def ask(
                 complete_chat_turn=complete_chat_turn,
                 mark_chat_turn_failed=mark_chat_turn_failed,
                 context_trace=context_trace,
+                deadline=deadline,
             ),
             lease=lease,
             on_unstarted=mark_unstarted,
+            deadline=deadline,
             media_type="application/x-ndjson",
         )
     except BaseException:
         if not lease_transferred:
-            lease.release()
+            await lease.close()
         raise

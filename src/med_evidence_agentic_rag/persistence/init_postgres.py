@@ -1,30 +1,26 @@
-"""初始化当前 PostgreSQL 业务表与 LangGraph Checkpointer 表。
-
-业务表完全以 ``postgres_tables.Base`` 的当前 ORM 定义为准；``create_application_tables`` 只对
-新数据库幂等创建缺失表，不再保留或迁移任何历史表、列和旧版本数据。LangGraph 自己的内部表
-由 ``open_checkpointer`` 创建，向量库与文件系统不在本模块管理。
-"""
+"""Validate business schema on startup; explicit initialization also sets up checkpoints."""
 
 import asyncio
 import sys
 
 from med_evidence_agentic_rag.models_and_database.postgres import engine
 from med_evidence_agentic_rag.models_and_database.postgres_checkpointer import open_checkpointer
-from med_evidence_agentic_rag.persistence.postgres_tables import Base
+from med_evidence_agentic_rag.persistence.migrations import migrate
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
 
 async def create_application_tables() -> None:
-    """按当前 ORM 定义幂等创建业务表。"""
+    """验证业务表已迁移到当前版本。"""
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(migrate, "check")
 
 
 async def initialize_postgres() -> None:
     """依次创建业务表和 LangGraph Checkpointer 内部表。"""
-    await create_application_tables()
+    async with engine.begin() as connection:
+        await connection.run_sync(migrate, "upgrade")
     async with open_checkpointer():
         pass
 

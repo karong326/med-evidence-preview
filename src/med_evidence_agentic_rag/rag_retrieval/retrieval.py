@@ -9,7 +9,6 @@ from pathlib import Path
 from time import perf_counter
 from uuid import UUID
 
-from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
 from med_evidence_agentic_rag.rag_retrieval.models import Evidence, RetrievalResult
 from med_evidence_agentic_rag.utils.config import hybrid_candidate_k
 from med_evidence_agentic_rag.utils.logger import setup_logger
@@ -22,6 +21,8 @@ def retrieve(
     query: str, *, top_k: int = hybrid_candidate_k, user_id: UUID | None = None
 ) -> RetrievalResult:
     """在本地 Chroma 中进行一次最小 Dense 检索。"""
+    from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
+
     normalized_query = query.strip()
     if not normalized_query:
         raise ValueError("query 不能为空")
@@ -59,14 +60,8 @@ def retrieve(
         evidences.append(evidence)
 
     logger.info(
-        "[Dense 检索] 问题=%s，候选=%d，耗时=%.2f秒",
-        normalized_query,
+        "Dense retrieval completed: candidates=%d, seconds=%.2f",
         len(evidences),
         perf_counter() - started_at,
     )
     return RetrievalResult(query=normalized_query, found=bool(evidences), evidences=evidences)
-
-
-if __name__ == "__main__":
-    result = retrieve("简洁快速回复：医院感染防控的核心措施是什么？")
-    logger.info("检索测试完成：是否命中=%s，证据数=%d", result.found, len(result.evidences))

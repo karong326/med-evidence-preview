@@ -33,7 +33,9 @@ def response(action: EmailAction) -> EmailActionResponse:
 async def pending_email_actions(
     conversation_id: UUID, user: AuthenticatedUser = Depends(require_user)
 ) -> list[EmailActionResponse]:
-    return [response(action) for action in email_approvals.list_pending(user.id, conversation_id)]
+    return [
+        response(action) for action in await email_approvals.list_pending(user.id, conversation_id)
+    ]
 
 
 @email_actions_router.post("/{action_id}/confirm")
@@ -53,6 +55,22 @@ async def reject_email(
     action_id: UUID, user: AuthenticatedUser = Depends(require_user)
 ) -> EmailActionResponse:
     try:
-        return response(email_approvals.reject(user.id, action_id))
+        return response(await email_approvals.reject(user.id, action_id))
+    except ApprovalError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+class DeliveryDecision(BaseModel):
+    delivered: bool
+
+
+@email_actions_router.post("/{action_id}/reconcile")
+async def reconcile_email(
+    action_id: UUID, decision: DeliveryDecision, user: AuthenticatedUser = Depends(require_user)
+) -> EmailActionResponse:
+    try:
+        return response(
+            await email_approvals.reconcile(user.id, action_id, delivered=decision.delivered)
+        )
     except ApprovalError as error:
         raise HTTPException(error.status_code, str(error)) from error

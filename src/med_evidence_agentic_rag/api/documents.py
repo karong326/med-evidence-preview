@@ -8,7 +8,7 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict
@@ -20,7 +20,9 @@ from med_evidence_agentic_rag.persistence.documents import (
     list_user_documents,
     mark_document_failed,
     mark_document_ready,
+    source_is_registered,
 )
+from med_evidence_agentic_rag.persistence.operations import journal
 from med_evidence_agentic_rag.rag_creation.ingestion import (
     delete_indexed_document,
     index_document,
@@ -31,13 +33,14 @@ from med_evidence_agentic_rag.services.document_deletion import (
     DocumentDeletionError,
     delete_document_assets,
 )
-from med_evidence_agentic_rag.utils.config import PROJECT_ROOT
+from med_evidence_agentic_rag.services.paths import scoped_source
+from med_evidence_agentic_rag.utils.config import DATA_ROOT
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 document_router = APIRouter(prefix="/api/documents", tags=["资料"])
 
-UPLOAD_DIRECTORY = PROJECT_ROOT / "data" / "uploads"
+UPLOAD_DIRECTORY = DATA_ROOT / "uploads"
 UPLOAD_MAX_BYTES = 200 * 1024 * 1024
 SUPPORTED_SUFFIXES = DocumentLoader.MINERU_SUFFIXES | DocumentLoader.TEXT_SUFFIXES
 
@@ -65,7 +68,7 @@ async def upload_document(
     if not filename or suffix not in SUPPORTED_SUFFIXES:
         raise HTTPException(status_code=400, detail="不支持该上传文件格式")
 
-    lease = resources.acquire(("document", str(current_user.id), filename.casefold()))
+    lease = await resources.obtain(("document", str(current_user.id), filename.casefold()))
     return await run_protected(lease, lambda: _upload_document(file, current_user, filename))
 
 
@@ -74,31 +77,41 @@ async def _upload_document(
     current_user: AuthenticatedUser,
     filename: str,
 ) -> dict[str, str | int]:
-    user_directory = (UPLOAD_DIRECTORY / str(current_user.id)).resolve()
-    user_directory.mkdir(parents=True, exist_ok=True)
-    target = (user_directory / filename).resolve()
-    if target.parent != user_directory:
-        raise HTTPException(status_code=400, detail="上传文件名不安全")
+    try:
+        target = scoped_source(UPLOAD_DIRECTORY, current_user.id, filename)
+    except ValueError as error:
+        raise HTTPException(400, "上传文件名不安全") from error
     if target.exists():
         raise HTTPException(status_code=409, detail="同名文件已存在")
+    async with journal.sessions() as session:
+        if await source_is_registered(session, current_user.id, target, match_filename=True):
+            raise HTTPException(status_code=409, detail="请先删除同名资料登记")
+    identity = uuid4()
+    op = await journal.begin("upload", current_user.id, identity, filename)
+    staging = target.with_name(f".{op.id}.part")
+    target.parent.mkdir(parents=True, exist_ok=True)
 
     # 分块写入并限制总大小，避免一次把大文件全部读入内存。
     total_bytes = 0
     try:
-        with target.open("wb") as output:
+        with staging.open("xb") as output:
             while chunk := await file.read(1024 * 1024):
                 total_bytes += len(chunk)
                 if total_bytes > UPLOAD_MAX_BYTES:
                     output.close()
-                    target.unlink(missing_ok=True)
+                    staging.unlink(missing_ok=True)
                     raise HTTPException(status_code=413, detail="上传文件超过 200MB")
                 output.write(chunk)
     except BaseException:
-        target.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
+        await journal.finish(op.id)
         raise
     if total_bytes == 0:
-        target.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
+        await journal.finish(op.id)
         raise HTTPException(status_code=400, detail="上传文件不能为空")
+
+    staging.replace(target)
 
     record = None
     try:
@@ -106,7 +119,9 @@ async def _upload_document(
             owner_user_id=current_user.id,
             filename=filename,
             source_path=str(target),
+            document_id=identity,
         )
+        await journal.set_phase(op.id, "indexing")
         chunk_count = await asyncio.to_thread(
             index_document,
             target,
@@ -114,24 +129,24 @@ async def _upload_document(
             document_id=str(record.id),
             owner_user_id=str(current_user.id),
         )
-        await mark_document_ready(record.id, chunk_count)
     except Exception as exc:
+        compensated = False
         if record is not None:
             try:
                 await asyncio.to_thread(delete_indexed_document, str(record.id))
+                compensated = True
             except Exception:
-                logger.exception("上传失败后的资料向量清理失败：%s", filename)
+                logger.exception("Failed upload vector cleanup failed")
             await mark_document_failed(record.id)
         target.unlink(missing_ok=True)
-        logger.exception("上传资料入库失败：%s", filename)
+        if compensated:
+            await journal.finish(op.id)
+        logger.exception("Document ingestion failed")
         raise HTTPException(status_code=500, detail="上传资料解析或入库失败") from exc
 
-    logger.info(
-        "上传资料入库完成：用户=%s，文件=%s，切块数=%d",
-        current_user.email,
-        filename,
-        chunk_count,
-    )
+    await mark_document_ready(record.id, chunk_count)
+    await journal.finish(op.id)
+    logger.info("Document indexed: chunks=%d", chunk_count)
     return {
         "id": str(record.id),
         "filename": filename,
@@ -159,7 +174,7 @@ async def delete_document(
     if record is None:
         raise HTTPException(status_code=404, detail="资料不存在")
 
-    lease = resources.acquire(("document", str(current_user.id), record.filename.casefold()))
+    lease = await resources.obtain(("document", str(current_user.id), record.filename.casefold()))
     return await run_protected(lease, lambda: _delete_document(document_id, current_user))
 
 
@@ -170,12 +185,22 @@ async def _delete_document(
     record = await get_owned_document(current_user.id, document_id)
     if record is None:
         raise HTTPException(status_code=404, detail="资料不存在")
+    target = scoped_source(UPLOAD_DIRECTORY, current_user.id, record.filename)
+    if Path(record.source_path).resolve() != target:
+        raise HTTPException(409, "Unsafe document registration")
+    async with journal.sessions() as session:
+        shared_source = await source_is_registered(
+            session, current_user.id, target, excluding=document_id
+        )
+    op = await journal.begin("delete", current_user.id, document_id, record.filename)
     try:
         await delete_document_assets(
             record,
             upload_root=UPLOAD_DIRECTORY / str(current_user.id),
+            remove_source=not shared_source,
         )
     except DocumentDeletionError as exc:
         raise HTTPException(status_code=500, detail="资料删除未完成，可重试") from exc
-    logger.info("用户资料已删除：用户=%s，文件=%s", current_user.email, record.filename)
+    await journal.finish(op.id)
+    logger.info("Personal document deleted")
     return {"deleted": True}

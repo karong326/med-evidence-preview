@@ -25,11 +25,14 @@ class Case(StrictModel):
     relevant_evidence_keys: list[Text] = Field(default_factory=list)
     answerable: bool | None = None
     expected_tools: list[Text] = Field(default_factory=list)
+    forbidden_tools: list[Text] = Field(default_factory=list)
+    expected_effects: dict[Text, Annotated[int, Field(ge=0)]] = Field(default_factory=dict)
     tags: list[Text] = Field(default_factory=list)
 
     @model_validator(mode='after')
     def unique_lists(self):
-        for values in (self.relevant_evidence_keys, self.expected_tools, self.tags):
+        for values in (self.relevant_evidence_keys, self.expected_tools,
+                       self.forbidden_tools, self.tags):
             if len(values) != len(set(values)):
                 raise ValueError('duplicate labels')
         return self
@@ -45,7 +48,8 @@ class Observation(StrictModel):
     retrieval_depth: int = Field(default=0, ge=0)
     citation_ids: list[Text] = Field(default_factory=list)
     cited_ids: list[Text] = Field(default_factory=list)
-    tools: list[Text] = Field(default_factory=list)
+    tools: list[Text] | None = None
+    effect_counts: dict[Text, Annotated[int, Field(ge=0)] | None] = Field(default_factory=dict)
     abstained: bool | None = None
     ttft_seconds: Nonnegative | None = None
     input_tokens: int | None = Field(default=None, ge=0)

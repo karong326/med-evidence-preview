@@ -36,7 +36,17 @@ def score_case(case: Case, result: Observation, ks: list[int]) -> dict[str, floa
     )
     scores['expected_tool_recall'] = (
         len(set(case.expected_tools) & set(result.tools)) / len(case.expected_tools)
-        if case.expected_tools else None
+        if case.expected_tools and result.tools is not None else None
+    )
+    scores['forbidden_tool_compliance'] = (
+        float(set(case.forbidden_tools).isdisjoint(result.tools))
+        if case.forbidden_tools and result.tools is not None else None
+    )
+    scores['side_effect_accuracy'] = (
+        sum(result.effect_counts[k] == v for k, v in case.expected_effects.items())
+        / len(case.expected_effects)
+        if case.expected_effects and all(result.effect_counts.get(k) is not None
+                                         for k in case.expected_effects) else None
     )
     scores['answerability_accuracy'] = (
         float(result.abstained != case.answerable)

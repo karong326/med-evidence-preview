@@ -16,7 +16,6 @@ import jieba  # pyright: ignore[reportMissingTypeStubs]
 from langchain_core.documents import Document
 from rank_bm25 import BM25Okapi  # pyright: ignore[reportMissingTypeStubs]
 
-from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
 from med_evidence_agentic_rag.rag_retrieval.models import Evidence, RetrievalResult
 from med_evidence_agentic_rag.utils.config import hybrid_candidate_k
 from med_evidence_agentic_rag.utils.logger import setup_logger
@@ -83,6 +82,8 @@ def _build_index() -> None:
     输入：无，数据来源为 Chroma。
     输出：无；更新模块内的 ``_documents`` 与 ``_bm25``。
     """
+    from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
+
     global _bm25, _documents
 
     stored = vectorstore.get(include=["documents", "metadatas"])
@@ -168,14 +169,8 @@ def retrieve_bm25(
         evidences.append(evidence)
 
     logger.info(
-        "[BM25 检索] 问题=%s，候选=%d，耗时=%.2f秒",
-        normalized_query,
+        "BM25 retrieval completed: candidates=%d, seconds=%.2f",
         len(evidences),
         perf_counter() - started_at,
     )
     return RetrievalResult(query=normalized_query, found=bool(evidences), evidences=evidences)
-
-
-if __name__ == "__main__":
-    result = retrieve_bm25("医院感染管理")
-    logger.info("BM25 独立测试完成：是否命中=%s，证据数=%d", result.found, len(result.evidences))

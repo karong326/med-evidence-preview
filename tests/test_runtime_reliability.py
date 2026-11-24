@@ -261,3 +261,144 @@ def test_cleanup_timeout_still_closes_provider(monkeypatch):
         assert len(asyncio.all_tasks()) == 1
 
     asyncio.run(run())
+
+
+def test_turn_deadline_persists_partial_output_and_closes_provider(monkeypatch):
+    from med_evidence_agentic_rag.services import chat_stream
+
+    monkeypatch.setattr(chat_stream, "agent_turn_deadline_seconds", 0.02, raising=False)
+
+    async def run():
+        closed = asyncio.Event()
+
+        async def source(*args, **kwargs):
+            try:
+                yield {"type": "answer", "content": "partial"}
+                yield {"type": "evidence", "evidences": [{"key": "synthetic"}]}
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        stream, failed, complete = build_stream(source)
+        async with asyncio.timeout(0.5):
+            events = [json.loads(line) async for line in stream]
+        assert events[-1]["code"] == "service_timeout"
+        assert failed.await_args.kwargs["answer"] == "partial"
+        assert failed.await_args.kwargs["evidence_snapshot"] == [{"key": "synthetic"}]
+        complete.assert_not_awaited()
+        assert closed.is_set()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("blocked_event", ["answer", "done"])
+def test_turn_deadline_cancels_blocked_asgi_send(monkeypatch, blocked_event):
+    from threading import Event
+    from types import SimpleNamespace
+
+    from starlette.requests import ClientDisconnect, Request
+
+    from med_evidence_agentic_rag.api import chat
+    from med_evidence_agentic_rag.services.coordination import run_stream_worker
+
+    async def run():
+        owner, conversation_id, turn_id = uuid4(), uuid4(), uuid4()
+        key = ("conversation", str(owner), str(conversation_id))
+        send_entered, send_cancelled = asyncio.Event(), asyncio.Event()
+        release_send, provider_closed = asyncio.Event(), asyncio.Event()
+        failure_saved = asyncio.Event()
+        worker_entered, release_worker = Event(), Event()
+        worker = None
+
+        def lease_is_active():
+            return any(lease.key == key for lease in chat.resources.active)
+
+        def sync_tool():
+            worker_entered.set()
+            assert release_worker.wait(3)
+
+        async def source(*args, **kwargs):
+            nonlocal worker
+            try:
+                if blocked_event == "answer":
+                    worker = asyncio.create_task(run_stream_worker(sync_tool))
+                    assert await asyncio.to_thread(worker_entered.wait, 1)
+                yield {"type": "trace", "trace": {"kind": "question_received", "step": 1}}
+                yield {"type": "evidence", "evidences": [{"id": "synthetic"}]}
+                yield {"type": "answer", "content": "partial"}
+                yield {"type": "done"}
+            finally:
+                assert lease_is_active()
+                provider_closed.set()
+
+        async def persist_failure(*args, **kwargs):
+            assert lease_is_active()
+            assert not provider_closed.is_set()
+            failure_saved.set()
+
+        failed = AsyncMock(side_effect=persist_failure)
+        complete = AsyncMock()
+        monkeypatch.setattr(chat, "agent_turn_deadline_seconds", 0.3, raising=False)
+        monkeypatch.setattr(chat, "stream_chat", source)
+        monkeypatch.setattr(chat, "complete_chat_turn", complete)
+        monkeypatch.setattr(chat, "mark_chat_turn_failed", failed)
+        monkeypatch.setattr(chat, "get_owned_conversation", AsyncMock(return_value=object()))
+        monkeypatch.setattr(chat.journal, "conversation_deleting", AsyncMock(return_value=False))
+        monkeypatch.setattr(chat, "list_recent_completed_turns", AsyncMock(return_value=[]))
+        monkeypatch.setattr(chat, "get_user_personalization", AsyncMock(return_value=(None, None)))
+        monkeypatch.setattr(chat, "create_chat_turn", AsyncMock(
+            return_value=SimpleNamespace(id=turn_id, turn_number=1),
+        ))
+        scope = {
+            "type": "http", "asgi": {"spec_version": "2.4"},
+            "app": SimpleNamespace(state=SimpleNamespace()),
+        }
+        response = await chat.ask(
+            chat.AskRequest(question="synthetic", conversation_id=conversation_id),
+            Request(scope), chat.AuthenticatedUser(owner, "owner@example.org"),
+        )
+
+        async def send(message):
+            if message["type"] == "http.response.body" and message.get("body"):
+                if json.loads(message["body"])["type"] == blocked_event:
+                    send_entered.set()
+                    try:
+                        await release_send.wait()
+                    except asyncio.CancelledError:
+                        send_cancelled.set()
+                        raise
+
+        request = asyncio.create_task(response(scope, AsyncMock(), send))
+        try:
+            await asyncio.wait_for(send_entered.wait(), 1.0)
+            await asyncio.wait_for(send_cancelled.wait(), 1.0)
+            await asyncio.wait_for(provider_closed.wait(), 1.0)
+            if blocked_event == "answer":
+                assert failure_saved.is_set()
+                failed.assert_awaited_once()
+                saved = failed.await_args.kwargs
+                assert saved["failure_code"] == "service_timeout"
+                assert saved["answer"] == "partial"
+                assert saved["evidence_snapshot"] == [{"id": "synthetic"}]
+                assert [event["kind"] for event in saved["execution_trace"]] == [
+                    "context_loaded", "question_received", "failure",
+                ]
+                assert lease_is_active()
+                assert not request.done()
+                complete.assert_not_awaited()
+            else:
+                complete.assert_awaited_once()
+                assert complete.await_args.args == (turn_id, "partial")
+                failed.assert_not_awaited()
+            release_worker.set()
+            with pytest.raises(ClientDisconnect):
+                await asyncio.wait_for(asyncio.shield(request), 1.0)
+            assert not lease_is_active()
+        finally:
+            release_worker.set()
+            release_send.set()
+            await asyncio.gather(request, return_exceptions=True)
+            if worker is not None:
+                await worker
+
+    asyncio.run(run())

@@ -21,7 +21,26 @@ if not postgresql_url:
 engine = create_async_engine(
     postgresql_url,
     pool_pre_ping=True,
+    hide_parameters=True,
     echo=False,
+)
+
+# Long-lived leases never consume the sessions needed by their own business work.
+lock_engine = create_async_engine(
+    postgresql_url,
+    pool_size=8,
+    max_overflow=0,
+    pool_timeout=1,
+    connect_args={"timeout": 5, "command_timeout": 5},
+    hide_parameters=True,
+)
+email_lock_engine = create_async_engine(
+    postgresql_url,
+    pool_size=4,
+    max_overflow=0,
+    pool_timeout=1,
+    connect_args={"timeout": 5, "command_timeout": 5},
+    hide_parameters=True,
 )
 
 # 业务代码每次通过工厂创建独立 Session，不共享全局 Session。

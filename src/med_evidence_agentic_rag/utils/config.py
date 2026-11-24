@@ -13,17 +13,17 @@ from dotenv import dotenv_values
 # 运行目录可能属于另一个服务；优先以本包所在的项目目录为准，再允许安装场景
 # 通过当前目录或上级目录提供配置。这样从 Harness 目录启动也不会读错 .env。
 working_directory = Path.cwd().resolve()
-source_project = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 project_candidates = [
-    source_project,
+    PROJECT_ROOT,
     working_directory,
     working_directory / "med-evidence-agentic-rag",
     *working_directory.parents,
 ]
-PROJECT_ROOT = next(
-    (path for path in project_candidates if (path / ".env").is_file()), working_directory
+ENV_FILE = next(
+    (path / ".env" for path in project_candidates if (path / ".env").is_file()),
+    PROJECT_ROOT / ".env",
 )
-ENV_FILE = PROJECT_ROOT / ".env"
 
 
 def load_project_environment(env_file: Path) -> None:
@@ -35,6 +35,31 @@ def load_project_environment(env_file: Path) -> None:
 
 # 进程环境变量优先；项目非空值补充缺项，空占位不覆盖已有凭证。
 load_project_environment(ENV_FILE)
+
+_data_root = Path(os.getenv("DATA_ROOT") or PROJECT_ROOT / "data")
+if not _data_root.is_absolute():
+    raise ValueError("DATA_ROOT must be an absolute path")
+DATA_ROOT = _data_root.resolve()
+
+
+def integer_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        raise ValueError(f"{name} must be an integer") from None
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
+
+
+app_host = os.getenv("APP_HOST", "127.0.0.1")
+app_port = integer_setting("APP_PORT", 8001, 1, 65535)
+diagnostics_token = os.getenv("DIAGNOSTICS_TOKEN", "")
+llm_timeout_seconds = integer_setting("LLM_TIMEOUT_SECONDS", 60, 1, 300)
+llm_max_retries = integer_setting("LLM_MAX_RETRIES", 1, 0, 5)
+agent_recursion_limit = integer_setting("AGENT_RECURSION_LIMIT", 32, 1, 128)
+agent_turn_deadline_seconds = integer_setting("AGENT_TURN_DEADLINE_SECONDS", 300, 1, 1800)
+max_question_characters = integer_setting("MAX_QUESTION_CHARACTERS", 16000, 1, 64000)
 
 
 # ===============================================================
@@ -55,7 +80,7 @@ reranker_model_path = os.getenv("RERANKER_MODEL_PATH", "")
 reranker_model = Path(reranker_model_path)
 
 # Chroma 向量数据库 持久化目录。
-chroma_persist_directory = Path(os.getenv("CHROMA_PERSIST_DIRECTORY", ""))
+chroma_persist_directory = Path(os.getenv("CHROMA_PERSIST_DIRECTORY") or DATA_ROOT / "chroma")
 if not chroma_persist_directory.is_absolute():
     chroma_persist_directory = (PROJECT_ROOT / chroma_persist_directory).resolve()
 

@@ -80,18 +80,26 @@ async function loadEmailActions(id = conversationId.value) {
   if (conversationId.value === id) emailActions.value = actions
 }
 
-async function decideEmail(actionId, decision) {
+async function decideEmail(actionId, decision, delivered) {
   if (emailBusy.value) return
+  const id = conversationId.value
   emailBusy.value = true
   emailActionMessage.value = ""
   try {
-    const response = await request(`/api/email-actions/${actionId}/${decision}`, { method: "POST" })
+    const options = { method: "POST" }
+    if (decision === "reconcile") options.body = JSON.stringify({ delivered })
+    const response = await request(`/api/email-actions/${actionId}/${decision}`, options)
     const action = await response.json()
+    if (conversationId.value !== id) return
     const messages = { sent: "邮件已被发送服务接受。", rejected: "已取消此邮件。",
-      executing: "邮件正在发送，请稍后刷新会话查看。", failed: "发送未能确认成功，请核实收件情况，系统不会自动重发。" }
-    emailActionMessage.value = messages[action.status] || "确认状态已更新。"
-    await loadEmailActions()
-  } catch (error) { emailActionMessage.value = error.message }
+      executing: "邮件正在发送，请稍后刷新会话查看。", failed: "发送服务未接受邮件。", unknown: "发送未能确认成功，请核实收件情况，系统不会自动重发。" }
+    emailActionMessage.value = decision === "reconcile"
+      ? "已记录核实结果，未发起邮件发送。"
+      : messages[action.status] || "确认状态已更新。"
+    await loadEmailActions(id)
+  } catch (error) {
+    if (conversationId.value === id) emailActionMessage.value = error.message
+  }
   finally { emailBusy.value = false }
 }
 
@@ -257,7 +265,7 @@ onMounted(async () => {
     <section class="chat-main">
       <header><strong>{{ conversations.find((item) => item.id === conversationId)?.title || "新对话" }}</strong><button @click="rightOpen = !rightOpen">{{ rightOpen ? "收起侧栏" : "证据与资料" }}</button></header>
       <section ref="messages" class="messages" aria-live="polite"><p v-if="!turns.length" class="empty">输入医学问题开始对话；医学内容将优先检索本地证据。</p><article v-for="turn in turns" :key="turn.id" class="turn"><div class="user"><small>用户 {{ formatTime(turn.question_at) }}</small><p>{{ turn.question }}</p></div><div class="assistant"><small>MedEvidence {{ formatTime(turn.answer_at) }}</small><div class="answer" v-html="renderMarkdown(turn.answer)" /><p v-if="turn.status === 'failed' && turn.failure_message" class="failure-message">本轮未完成：{{ turn.failure_message }} 输入“重试”可重新执行刚才的问题。</p><div class="turn-actions"><button v-if="turn.evidence_snapshot?.length" @click="openTurnPanel(turn, 'evidence')">原文证据</button><button v-if="turn.execution_trace?.length" @click="openTurnPanel(turn, 'trace')">执行记录</button></div></div></article></section>
-      <EmailConfirmations :actions="emailActions" :busy="emailBusy" :message="emailActionMessage" @confirm="decideEmail($event, 'confirm')" @reject="decideEmail($event, 'reject')" />
+      <EmailConfirmations :actions="emailActions" :busy="emailBusy" :message="emailActionMessage" @confirm="decideEmail($event, 'confirm')" @reject="decideEmail($event, 'reject')" @reconcile="(id, delivered) => decideEmail(id, 'reconcile', delivered)" />
       <form class="composer" @submit.prevent="sendQuestion"><textarea ref="composerInput" v-model="question" rows="2" placeholder="请输入医学问题" :disabled="sending" @input="resizeQuestion" @keydown.enter.exact.prevent="sendQuestion" /><button type="submit" :disabled="sending || !question.trim()">{{ sending ? "回答中" : "发送" }}</button></form>
     </section>
     <RightPanel v-if="rightOpen" :active-tab="activeTab" :evidences="currentEvidences" :trace="currentTrace" :documents="documents" :upload-status="uploadStatus" @select-tab="activeTab = $event" @upload="uploadDocument" @delete-document="deleteDocument" />

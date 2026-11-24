@@ -1,0 +1,24 @@
+groups:
+  - name: medevidence
+    rules:
+      - alert: MedEvidenceUnavailable
+        expr: up{job="medevidence"} == 0 or medevidence_ready == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Application scrape or readiness failed
+      - alert: MedEvidenceServerErrors
+        expr: sum by (instance) (increase(medevidence_http_request_duration_seconds_count{status_class="5xx"}[5m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Sustained server errors
+      - alert: MedEvidenceRecoveryFailure
+        expr: medevidence_recovery_total{outcome=~"failed|emails_unknown"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Recovery reported failed or uncertain work

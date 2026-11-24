@@ -27,6 +27,9 @@ def load_routes(name, filename):
     return module
 
 
+pytestmark = pytest.mark.usefixtures("isolated_journal")
+
+
 @pytest.fixture
 def chat(monkeypatch):
     agent = ModuleType("isolated_coordination_agent")
@@ -54,6 +57,9 @@ def test_ask_conflict_precedes_new_turn_and_unstarted_close_releases(chat):
         with pytest.raises(HTTPException) as conflict:
             await chat.ask(body, request, user)
         assert conflict.value.status_code == 409
+        with pytest.raises(HTTPException) as delete_conflict:
+            await resources.obtain(("owner-delete", str(user.id)))
+        assert delete_conflict.value.status_code == 409
         assert chat.create_chat_turn.await_count == 1
         await response.aclose()
         chat.mark_chat_turn_failed.assert_awaited_once()
@@ -120,14 +126,14 @@ def test_delete_http_checks_ownership_before_busy_response(monkeypatch):
     app.dependency_overrides[require_user] = lambda: user
     owned = AsyncMock(return_value=None)
     monkeypatch.setattr(conversations, "get_owned_conversation", owned)
-    lease = resources.acquire(("conversation", str(user.id), str(conversation_id)))
+    lease = asyncio.run(resources.obtain(("conversation", str(user.id), str(conversation_id))))
     try:
         with TestClient(app) as client:
             assert client.delete(f"/api/conversations/{conversation_id}").status_code == 404
             owned.return_value = object()
             assert client.delete(f"/api/conversations/{conversation_id}").status_code == 409
     finally:
-        lease.release()
+        asyncio.run(lease.close())
 
 
 def test_cancelled_upload_blocks_delete_until_vectors_and_status_finish(monkeypatch, tmp_path):
@@ -150,7 +156,9 @@ def test_cancelled_upload_blocks_delete_until_vectors_and_status_finish(monkeypa
     )
     routes = load_routes("isolated_coordination_documents", "documents.py")
     user = AuthenticatedUser(uuid4(), "a@example.org")
-    record = SimpleNamespace(id=uuid4(), filename="test.txt")
+    record = SimpleNamespace(
+        id=uuid4(), filename="test.txt", source_path=str(tmp_path / str(user.id) / "test.txt")
+    )
     monkeypatch.setattr(routes, "UPLOAD_DIRECTORY", tmp_path)
     monkeypatch.setattr(routes, "create_document", AsyncMock(return_value=record))
     monkeypatch.setattr(routes, "get_owned_document", AsyncMock(return_value=record))
@@ -169,6 +177,9 @@ def test_cancelled_upload_blocks_delete_until_vectors_and_status_finish(monkeypa
             with pytest.raises(HTTPException) as error:
                 await routes.delete_document(record.id, user)
             assert error.value.status_code == 409
+            with pytest.raises(HTTPException) as delete_conflict:
+                await resources.obtain(("owner-delete", str(user.id)))
+            assert delete_conflict.value.status_code == 409
             deletion.delete_document_assets.assert_not_awaited()
         finally:
             finish.set()
@@ -212,3 +223,51 @@ def test_closed_upload_cleans_partial_file_and_releases_lease(monkeypatch, tmp_p
         asyncio.run(upload(file, user))
     assert not resources.active
     assert not target.exists()
+
+
+@pytest.mark.parametrize("compensation_fails", [False, True])
+def test_interrupted_index_keeps_intent_until_compensation_finishes(
+    monkeypatch, tmp_path, isolated_journal, compensation_fails
+):
+    from med_evidence_agentic_rag.persistence import documents as persistence
+    from med_evidence_agentic_rag.persistence.operations import journal
+    from med_evidence_agentic_rag.persistence.postgres_tables import User
+
+    vectors = set()
+    ingestion = ModuleType("isolated_partial_index")
+
+    def index(source, kind, *, document_id, owner_user_id):
+        vectors.add(document_id)
+        raise RuntimeError("interrupted after a partial write")
+
+    def remove(document_id):
+        if compensation_fails:
+            raise RuntimeError("index temporarily unavailable")
+        vectors.discard(document_id)
+
+    ingestion.index_document = index
+    ingestion.delete_indexed_document = remove
+    monkeypatch.setitem(sys.modules, "med_evidence_agentic_rag.rag_creation.ingestion", ingestion)
+    monkeypatch.setattr(persistence, "AsyncSessionLocal", journal.sessions)
+    routes = load_routes("isolated_partial_upload", "documents.py")
+    monkeypatch.setattr(routes, "UPLOAD_DIRECTORY", tmp_path)
+    user = AuthenticatedUser(uuid4(), "test@example.org")
+
+    async def run():
+        async with journal.sessions.begin() as session:
+            session.add(User(id=user.id, email=user.email))
+        with pytest.raises(HTTPException) as failed:
+            await routes.upload_document(UploadFile(io.BytesIO(b"demo"), filename="a.txt"), user)
+        assert failed.value.status_code == 500
+        (document,) = await persistence.list_user_documents(user.id)
+        assert document.status == "failed"
+        assert not (tmp_path / str(user.id) / "a.txt").exists()
+        pending = await journal.pending(10)
+        if compensation_fails:
+            assert [op.resource_id for op in pending] == [document.id]
+            assert vectors == {str(document.id)}
+        else:
+            assert pending == []
+            assert vectors == set()
+
+    asyncio.run(run())

@@ -3,6 +3,9 @@
 import asyncio
 import json
 import re
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from time import perf_counter
 from typing import TYPE_CHECKING, Literal, Protocol
 from uuid import UUID
@@ -62,6 +65,7 @@ class RetrievalAdapter:
         self.user_id = UUID(user_id)
         self.top_k = top_k
         self.mode = mode
+        self._owns_index = ContextVar[bool]("owns_index", default=False)
         self._lock = asyncio.Lock()
         self.metadata: dict[str, object] = {'adapter': 'retrieval', 'version': 2,
                          'retrieval_mode': mode,
@@ -79,16 +83,26 @@ class RetrievalAdapter:
 
         return retrieve_with_rerank(query, user_id=self.user_id), reranker_top_k
 
+    @asynccontextmanager
+    async def index_scope(self) -> AsyncGenerator[None]:
+        from med_evidence_agentic_rag.services.coordination import local_guards
+
+        lease = await local_guards.obtain(("index-owner", "maintenance"))
+        token = self._owns_index.set(True)
+        try:
+            yield
+        finally:
+            self._owns_index.reset(token)
+            await lease.close()
+
     async def execute(self, case: Case) -> Observation:
+        from med_evidence_agentic_rag.services.coordination import run_stream_worker
+
+        if not self._owns_index.get():
+            async with self.index_scope():
+                return await self.execute(case)
         async with self._lock:
-            # Keep lock held until a timed-out backend thread exits.
-            task = asyncio.create_task(asyncio.to_thread(
-                self._retrieve, case.query))
-            try:
-                result, depth = await asyncio.shield(task)
-            except asyncio.CancelledError:
-                await task
-                raise
+            result, depth = await run_stream_worker(lambda: self._retrieve(case.query))
         self.metadata['configured_depth'] = depth
         return Observation(id=case.id, retrieval_depth=depth,
                            evidence_keys=[evidence_key(e.source, e.content)
@@ -127,9 +141,14 @@ class HTTPAgentAdapter:
                                     conversation_id: str) -> bool:
         async def delete() -> None:
             async with asyncio.timeout(_CLEANUP_TIMEOUT_SECONDS):
-                response = await client.delete(
-                    self.url + '/api/conversations/' + conversation_id, headers=self.headers)
-                response.raise_for_status()
+                while True:
+                    response = await client.delete(
+                        self.url + '/api/conversations/' + conversation_id, headers=self.headers)
+                    if response.status_code != 409:
+                        response.raise_for_status()
+                        return
+                    # A disconnected ask can still hold the conversation while it drains.
+                    await asyncio.sleep(0.1)
 
         # Own the task until it has finished or acknowledged its own deadline cancellation.
         # Shield alone is insufficient: caller cancellation must not outlive the client.
@@ -154,12 +173,31 @@ class HTTPAgentAdapter:
         return not failed
 
     async def _execute(self, case: Case, client: httpx.AsyncClient) -> Observation:
-        created = await client.post(self.url + '/api/conversations', headers=self.headers)
-        created.raise_for_status()
-        conversation_id = str(UUID(created.json()['id']))
+        async def create() -> str:
+            created = await client.post(self.url + '/api/conversations', headers=self.headers)
+            created.raise_for_status()
+            return str(UUID(created.json()['id']))
+
+        creation = asyncio.create_task(create())
+        try:
+            conversation_id = await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            # A cancelled POST may already have created a conversation on the server.
+            while not creation.done():
+                try:
+                    await asyncio.wait({creation})
+                except asyncio.CancelledError:
+                    continue
+            if self.cleanup and not await self._cleanup_conversation(client, creation.result()):
+                raise CleanupFailure('temporary conversation cleanup failed') from None
+            raise
         result = Observation(id=case.id)
+        observed_tools: list[str] = []
+        trace_available = False
+        unidentified_attempt = False
         parts: list[str] = []
         done = False
+        cancelled = False
         start = perf_counter()
         try:
             async with client.stream('POST', self.url + '/api/ask', headers=self.headers,
@@ -192,14 +230,18 @@ class HTTPAgentAdapter:
                             result.citation_ids.append(citation)
                     elif kind == 'trace':
                         trace = event['trace']
+                        if trace.get('kind') in ('question_received', 'tool_call'):
+                            trace_available = True
                         if trace.get('kind') == 'tool_call':
                             name = trace.get('tool_name')
                             if name is None:
                                 match = re.search(r'原生名称：[ ]*([a-zA-Z_][\w]*)',
                                                   trace.get('detail', ''))
                                 name = match.group(1) if match else None
-                            if isinstance(name, str):
-                                result.tools.append(name)
+                            if isinstance(name, str) and name:
+                                observed_tools.append(name)
+                            else:
+                                unidentified_attempt = True
                     elif kind == 'done':
                         done = True
                     elif kind == 'error':
@@ -207,6 +249,11 @@ class HTTPAgentAdapter:
                         break
             if not done and result.error is None:
                 result.error = 'incomplete'
+            if done and result.error is None and trace_available and not unidentified_attempt:
+                result.tools = observed_tools
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except httpx.TimeoutException:
             result.error = 'timeout'
         except httpx.HTTPStatusError:
@@ -216,9 +263,10 @@ class HTTPAgentAdapter:
         except (ValueError, KeyError, TypeError):
             result.error = 'protocol'
         finally:
-            if self.cleanup:
-                if not await self._cleanup_conversation(client, conversation_id):
-                    result.error = 'cleanup'
+            if self.cleanup and not await self._cleanup_conversation(client, conversation_id):
+                if cancelled:
+                    raise CleanupFailure('temporary conversation cleanup failed') from None
+                result.error = 'cleanup'
         result.answer = ''.join(parts) if parts else None
         # Streaming agent has no fixed k; only observed ranks can be scored.
         result.retrieval_depth = len(result.evidence_keys)

@@ -34,7 +34,11 @@ from med_evidence_agentic_rag.persistence.conversations import (
     get_or_create_access_user,
     get_or_create_user,
 )
-from med_evidence_agentic_rag.tools.send_email import EmailRecipientError, send_email
+from med_evidence_agentic_rag.tools.send_email import (
+    DeliveryUncertain,
+    EmailRecipientError,
+    send_email,
+)
 from med_evidence_agentic_rag.utils.config import (
     access_token_code,
     admin_access_code,
@@ -202,11 +206,13 @@ async def send_email_code(request: EmailCodeRequest) -> dict[str, str]:
         await delete_verification_code(email)
         await clear_email_code_cooldown(email)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DeliveryUncertain:
+        sent = False
     if not sent:
         await delete_verification_code(email)
         await clear_email_code_cooldown(email)
         raise HTTPException(status_code=502, detail="验证码邮件发送失败")
-    logger.info("登录验证码邮件已发送：%s", email)
+    logger.info("登录验证码邮件已发送")
     return {"message": "验证码已发送"}
 
 
@@ -224,7 +230,7 @@ async def login_with_email(request: EmailLoginRequest) -> dict[str, str]:
 
     user = await get_or_create_user(email)
     token = create_access_token(user.id, user.email)
-    logger.info("邮箱登录成功：%s", email)
+    logger.info("Email sign-in succeeded")
     return {"access_token": token, "token_type": "bearer"}
 
 
@@ -246,5 +252,5 @@ async def login_with_access_token(request: AccessTokenLoginRequest) -> dict[str,
 
     user = await get_or_create_access_user(request.visitor_id)
     token = create_access_token(user.id, user.email)
-    logger.info("访问令牌登录成功：用户=%s", user.id)
+    logger.info("Access-code sign-in succeeded")
     return {"access_token": token, "token_type": "bearer", "role": "user"}

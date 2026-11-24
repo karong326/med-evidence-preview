@@ -8,7 +8,21 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ${{ github.run_id }}
+          POSTGRES_USER: test
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
       redis:
+        ports:
+          - 127.0.0.1:6379:6379
         image: redis:7-alpine
         options: >-
           --health-cmd "redis-cli ping"
@@ -28,11 +42,12 @@ jobs:
       - run: python -m pip check
       - run: python -m ruff check src tests scripts
       - run: python -m pyright --pythonpath "$(which python)"
-      - run: python -m pytest -q tests
-      - name: Atomic Redis integration on disposable service
+      - name: Offline suite and synthetic deployment on disposable services
         env:
+          MEDEVIDENCE_TEST_POSTGRES_URL: postgresql+asyncpg://test:${{ github.run_id }}@127.0.0.1:5432/test
+          MEDEVIDENCE_TEST_REDIS_URL: redis://127.0.0.1:6379/0
           MEDEVIDENCE_TEST_REDIS_CONTAINER: ${{ job.services.redis.id }}
-        run: python -m pytest -q tests/test_auth_atomic_redis.py
+        run: python -m pytest -q tests
       - name: Verify public preview content
         run: python scripts/check_preview.py
   frontend:

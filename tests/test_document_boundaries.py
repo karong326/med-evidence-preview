@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 
 from med_evidence_agentic_rag.api.auth import AuthenticatedUser, require_user
 
+pytestmark = pytest.mark.usefixtures("isolated_journal")
+
 
 def load_file(name, relative):
     path = Path(__file__).parents[1] / "src" / "med_evidence_agentic_rag" / relative

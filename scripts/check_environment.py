@@ -14,7 +14,6 @@ def validate_configuration(values, root):
         "LLM_API_KEY",
         "LLM_BASE_URL",
         "POSTGRESQL_URL",
-        "CHROMA_PERSIST_DIRECTORY",
         "CHROMA_COLLECTION_NAME",
         "JWT_SECRET_KEY",
         "ACCESS_TOKEN_CODE",
@@ -35,12 +34,11 @@ def validate_configuration(values, root):
             path = root / path
         if not value or not path.is_dir():
             issues.append(f"{key}: local model directory is missing")
-    chroma = values.get("CHROMA_PERSIST_DIRECTORY")
-    if (
-        chroma
-        and (Path(chroma) if Path(chroma).is_absolute() else root / chroma).resolve()
-        == root.resolve()
-    ):
+    data_root = Path(values.get("DATA_ROOT") or root / "data")
+    if not data_root.is_absolute():
+        issues.append("DATA_ROOT: use an absolute deployment directory")
+    chroma = Path(values.get("CHROMA_PERSIST_DIRECTORY") or data_root / "chroma")
+    if (root / chroma).resolve() == root.resolve():
         issues.append("CHROMA_PERSIST_DIRECTORY: use a dedicated data directory")
     if values.get("RERANKER_PRECISION", "float16") not in {"float16", "float32", "bfloat16"}:
         issues.append("RERANKER_PRECISION: invalid precision")
@@ -63,8 +61,6 @@ def main():
     issues = validate_configuration(values, root)
     if sys.version_info[:2] != (3, 12):
         issues.append("Python: this project requires Python 3.12")
-    if not (root / ".env").is_file():
-        issues.append(".env: create it from .env.example in the project root")
     if not (root / "frontend" / "dist" / "index.html").is_file():
         issues.append("frontend: run npm ci and npm run build in frontend/")
     if args.cuda:

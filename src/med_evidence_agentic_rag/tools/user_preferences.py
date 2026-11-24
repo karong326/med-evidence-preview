@@ -66,7 +66,7 @@ async def manage_user_preference(
     # clear    清空偏好：
     if action == "clear":
         await clear_user_preference(user_id)
-        logger.info("用户长期回答偏好已清空：用户=%s", user_id)
+        logger.info("Answer preferences cleared")
         return json.dumps(
             {"success": True, "action": "clear", "message": "长期回答偏好已清空"},
             ensure_ascii=False,
@@ -80,7 +80,7 @@ async def manage_user_preference(
         return _user_input_error(action, "长期偏好不能超过 500 个字符，请缩短后重试。")
 
     await save_user_preference(user_id, value)
-    logger.info("用户长期回答偏好已保存：用户=%s", user_id)
+    logger.info("Answer preferences saved")
     return json.dumps(
         {"success": True, "action": "save", "message": "长期回答偏好已保存"},
         ensure_ascii=False,
@@ -110,7 +110,7 @@ async def manage_user_memory(
         if not value or len(value) > 50:
             return _user_input_error(action, "用户称呼不能为空且不能超过 50 个字符，请重新提供。")
         await save_user_name(user_id, value)
-        logger.info("用户称呼已保存：用户=%s", user_id)
+        logger.info("Display name saved")
         return json.dumps(
             {"success": True, "action": action, "message": "用户称呼已保存"},
             ensure_ascii=False,
@@ -121,7 +121,7 @@ async def manage_user_memory(
     if not alias or len(alias) > 50 or "@" not in address or len(address) > 320:
         return _user_input_error(action, "联系人别名或邮箱格式不正确，请重新提供。")
     await save_user_contact(user_id, alias, address)
-    logger.info("用户联系人已保存：用户=%s，别名=%s", user_id, alias)
+    logger.info("Contact saved")
     return json.dumps(
         {"success": True, "action": action, "message": "用户联系人已保存"},
         ensure_ascii=False,

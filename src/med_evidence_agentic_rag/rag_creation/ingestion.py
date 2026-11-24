@@ -11,11 +11,8 @@ from pathlib import Path
 
 from langchain_core.documents import Document
 
-from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
 from med_evidence_agentic_rag.rag_creation.loader import DocumentLoader
 from med_evidence_agentic_rag.rag_creation.splitter import split_documents
-from med_evidence_agentic_rag.rag_retrieval.bm25 import invalidate_bm25_index
-from med_evidence_agentic_rag.utils.config import PROJECT_ROOT
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
@@ -30,6 +27,9 @@ def index_document(
     owner_user_id: str | None = None,
 ) -> int:
     """将一份文档写入 Chroma，并返回写入的 chunk 数。"""
+    from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
+    from med_evidence_agentic_rag.rag_retrieval.bm25 import invalidate_bm25_index
+
     # 先删除该文件旧 chunks，再写入新 chunks：
 
     # 文件内容哈希作为稳定 document_id，同一内容可得到相同身份。
@@ -73,27 +73,27 @@ def index_document(
     # 使从 Chroma 构建的内存索引失效。
     invalidate_bm25_index()
 
-    logger.info("文档入库完成：%s，切块数=%d", source.name, len(chunks))
+    logger.info("Document vectors indexed: chunks=%d", len(chunks))
     return len(chunks)
 
 
 def delete_indexed_document(document_id: str) -> None:
     """按资料编号删除全部向量文本块，并让 BM25 下次自动重建。"""
+    from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
+    from med_evidence_agentic_rag.rag_retrieval.bm25 import invalidate_bm25_index
+
     # 按 document_id 删除一份用户资料：
     vectorstore.delete(where={"document_id": document_id})
     invalidate_bm25_index()
-    logger.info("‘用户资料向量’已删除：document_id=%s", document_id)
+    logger.info("Personal document vectors deleted")
 
 
 def delete_indexed_source(source: str) -> None:
     """按基础资料的真实路径删除全部向量文本块。"""
+    from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
+    from med_evidence_agentic_rag.rag_retrieval.bm25 import invalidate_bm25_index
+
     # 按真实绝对路径 source 删除一份基础资料：
     vectorstore.delete(where={"source": source})
     invalidate_bm25_index()
-    logger.info("‘基础资料向量’已删除：source=%s", source)
-
-
-if __name__ == "__main__":
-    sample = PROJECT_ROOT / "data" / "raw" / "who_patient_safety_fact_sheet.html"
-    chunk_count = index_document(sample)
-    logger.info("’ingestion‘功能实现的独立测试-成功：%s，切块数=%d", sample.name, chunk_count)
+    logger.info("Base document vectors deleted")

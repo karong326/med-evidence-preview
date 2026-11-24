@@ -6,13 +6,17 @@
 """
 
 import json
+import os
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-PROMPT_LOG_DIRECTORY = Path(__file__).resolve().parent / "prompt_logs"
+from med_evidence_agentic_rag.utils.config import DATA_ROOT
+
+PROMPT_LOG_DIRECTORY = DATA_ROOT / "prompts"
 PROMPT_FILE = PROMPT_LOG_DIRECTORY / "agent_prompts.json"
+_LEGACY_PROMPT_FILE = Path(__file__).resolve().parent / "prompt_logs" / "agent_prompts.json"
 PROMPT_HISTORY_FILES = {
     "system_prompt": PROMPT_LOG_DIRECTORY / "system_prompt_history.md",
     "query_rewrite_prompt": PROMPT_LOG_DIRECTORY / "query_rewrite_prompt_history.md",
@@ -26,7 +30,10 @@ class PromptVersionConflictError(RuntimeError):
 
 def load_prompts() -> dict[str, str]:
     """读取已保存提示词；首次运行时返回空覆盖项。"""
-    if not PROMPT_FILE.is_file():
+    path = PROMPT_FILE
+    if not path.is_file() and "DATA_ROOT" not in os.environ:
+        path = _LEGACY_PROMPT_FILE
+    if not path.is_file():
         return {
             "system_prompt": "",
             "query_rewrite_prompt": "",
@@ -34,7 +41,7 @@ def load_prompts() -> dict[str, str]:
             "updated_at": "",
         }
     try:
-        value = json.loads(PROMPT_FILE.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {
             "system_prompt": "",

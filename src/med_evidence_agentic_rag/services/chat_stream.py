@@ -3,13 +3,24 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
 
+from langgraph.errors import GraphRecursionError
+
+from med_evidence_agentic_rag.services.telemetry import telemetry
+from med_evidence_agentic_rag.utils.config import agent_turn_deadline_seconds
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 _CLEANUP_TIMEOUT_SECONDS = 2.0
+
+
+@dataclass
+class StreamDeadline:
+    expires_at: float
+    transport_expired: bool = False
 
 
 def _failure_details(error: Exception) -> tuple[str, str]:
@@ -23,6 +34,8 @@ def _failure_details(error: Exception) -> tuple[str, str]:
         return "llm_service", "大语言模型服务暂时不可用，请稍后重试。"
     if isinstance(error, TimeoutError):
         return "service_timeout", "服务响应超时，请稍后重试。"
+    if isinstance(error, GraphRecursionError):
+        return "agent_step_limit", "问答已达到执行步骤上限，请缩小问题范围后重试。"
     if isinstance(error, (ConnectionError, OSError)):
         return "service_network", "服务连接异常，请检查服务后重试。"
     return "agent_execution", "Agent、检索或工具执行失败，请稍后重试。"
@@ -105,6 +118,7 @@ async def encode_chat_stream(
     complete_chat_turn: Callable[..., Awaitable[object]],
     mark_chat_turn_failed: Callable[..., Awaitable[object]],
     context_trace: str | None = None,
+    deadline: StreamDeadline | None = None,
 ) -> AsyncGenerator[str, None]:
     """Persist before done; retain partial results when the stream is interrupted."""
     answers: list[str] = []
@@ -112,6 +126,9 @@ async def encode_chat_stream(
     traces: list[dict[str, object]] = []
     terminal = False
     source: AsyncIterator[dict[str, object]] | None = None
+    loop = asyncio.get_running_loop()
+    if deadline is None:
+        deadline = StreamDeadline(loop.time() + agent_turn_deadline_seconds)
 
     def failure_events(code: str, message: str) -> list[dict[str, object]]:
         safe_message = f"{message}\n关联编号：{turn_id}"
@@ -138,6 +155,13 @@ async def encode_chat_stream(
         if terminal:
             return
         terminal = True
+        outcome = {
+            "service_timeout": "timeout",
+            "agent_interrupted": "interrupted",
+            "persistence_error": "persistence",
+            "agent_incomplete": "incomplete",
+        }.get(code, "execution")
+        telemetry.turn_failures[outcome] += 1
         try:
             await mark_chat_turn_failed(
                 turn_id,
@@ -148,7 +172,7 @@ async def encode_chat_stream(
                 execution_trace=traces or None,
             )
         except Exception:
-            logger.exception("问答失败状态保存失败：会话=%s，轮次=%s", conversation_id, turn_id)
+            logger.exception("Failed turn could not be saved")
 
     try:
         if context_trace:
@@ -168,7 +192,13 @@ async def encode_chat_stream(
             agent_input=agent_input,
             chat_agent=chat_agent,
         )
-        async for event in source:
+        while True:
+            if loop.time() >= deadline.expires_at:
+                raise TimeoutError
+            async with asyncio.timeout_at(deadline.expires_at):
+                event = await anext(source, None)
+            if event is None:
+                break
             event_type = event.get("type")
             if event_type == "error":
                 raise RuntimeError("Agent emitted an error event")
@@ -189,16 +219,17 @@ async def encode_chat_stream(
                 event = {"type": "trace", "trace": trace}
             if event_type == "done":
                 try:
-                    await complete_chat_turn(
-                        turn_id,
-                        "".join(answers),
-                        evidence_snapshot=evidences or None,
-                        execution_trace=traces or None,
-                    )
+                    async with asyncio.timeout_at(deadline.expires_at):
+                        await complete_chat_turn(
+                            turn_id,
+                            "".join(answers),
+                            evidence_snapshot=evidences or None,
+                            execution_trace=traces or None,
+                        )
+                except TimeoutError:
+                    raise
                 except Exception:
-                    logger.exception(
-                        "问答完成结果保存失败：会话=%s，轮次=%s", conversation_id, turn_id
-                    )
+                    logger.exception("Completed turn could not be saved")
                     code, message = "persistence_error", "问答结果保存失败，请稍后重试。"
                     events = failure_events(code, message)
                     await _bounded_cleanup(save_failure(code, message))
@@ -218,7 +249,7 @@ async def encode_chat_stream(
         raise
     except Exception as error:
         code, message = _failure_details(error)
-        logger.exception("Agent 问答执行失败：会话=%s，轮次=%s", conversation_id, turn_id)
+        logger.exception("Agent turn failed")
         events = failure_events(code, message)
         await _bounded_cleanup(save_failure(code, message))
         for failure_event in events:
@@ -226,7 +257,10 @@ async def encode_chat_stream(
     finally:
         try:
             if not terminal:
-                code, message = "agent_interrupted", "问答连接已中断，请重试。"
+                if deadline.transport_expired:
+                    code, message = _failure_details(TimeoutError())
+                else:
+                    code, message = "agent_interrupted", "问答连接已中断，请重试。"
                 failure_events(code, message)
                 await _bounded_cleanup(save_failure(code, message))
         finally:
@@ -237,8 +271,6 @@ async def encode_chat_stream(
                     try:
                         await close()
                     except Exception:
-                        logger.exception(
-                            "Agent 流关闭失败：会话=%s，轮次=%s", conversation_id, turn_id
-                        )
+                        logger.exception("Agent stream close failed")
 
             await _bounded_cleanup(close_source())

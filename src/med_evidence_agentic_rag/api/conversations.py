@@ -19,6 +19,7 @@ from med_evidence_agentic_rag.persistence.conversations import (
     list_chat_turns,
     list_conversations,
 )
+from med_evidence_agentic_rag.persistence.operations import journal
 from med_evidence_agentic_rag.services.coordination import resources, run_protected
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
@@ -60,7 +61,8 @@ async def create_conversation_endpoint(
     current_user: AuthenticatedUser = Depends(require_user),
 ) -> ConversationResponse:
     """用户首次发送问题前创建一个新会话。"""
-    conversation = await create_conversation(current_user.id)
+    lease = await resources.obtain(("owner-read", str(current_user.id)))
+    conversation = await run_protected(lease, lambda: create_conversation(current_user.id))
     return ConversationResponse.model_validate(conversation)
 
 
@@ -96,7 +98,9 @@ async def delete_conversation_endpoint(
     if owned is None:
         raise HTTPException(status_code=404, detail="会话不存在")
 
-    lease = resources.acquire(("conversation", str(current_user.id), str(conversation_id)))
+    lease = await resources.obtain(
+        ("conversation-delete", str(current_user.id), str(conversation_id))
+    )
     return await run_protected(
         lease, lambda: _delete_conversation(conversation_id, request, current_user)
     )
@@ -114,8 +118,10 @@ async def _delete_conversation(
         raise HTTPException(status_code=503, detail="会话上下文服务未就绪，暂时无法删除会话")
 
     # conversation_id 同时是 LangGraph thread_id，先清理不可见的 Agent 上下文。
+    op = await journal.begin("conversation-delete", current_user.id, conversation_id, "")
     await checkpointer.adelete_thread(str(conversation_id))
     deleted = await delete_owned_conversation(current_user.id, conversation_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在")
-    logger.info("历史会话已删除：用户=%s，会话=%s", current_user.id, conversation_id)
+    await journal.finish(op.id)
+    logger.info("Conversation deleted")

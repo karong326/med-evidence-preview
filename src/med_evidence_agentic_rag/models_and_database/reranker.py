@@ -7,11 +7,17 @@
 from sentence_transformers import CrossEncoder
 
 from med_evidence_agentic_rag.models_and_database.inference import Float32Sigmoid
-from med_evidence_agentic_rag.utils.config import reranker_model, reranker_precision
+from med_evidence_agentic_rag.utils.config import (
+    reranker_model,
+    reranker_model_path,
+    reranker_precision,
+)
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
+if not reranker_model_path or not reranker_model.is_dir():
+    raise RuntimeError("Required local reranker model directory is missing")
 reranker = CrossEncoder(
     str(reranker_model),
     device="cuda",
@@ -21,4 +27,4 @@ reranker = CrossEncoder(
     activation_fn=Float32Sigmoid(),
 )
 
-logger.info("Cross-Encoder 重排序模型已加载：%s", reranker_model)
+logger.info("Local reranker loaded")

@@ -1,67 +1,69 @@
-"""创建项目统一的、Windows 编码安全的控制台日志。
+"""Application JSON logs with correlation and bounded exception diagnostics."""
 
-``setup_logger`` 按模块名复用 Logger，避免热重载或多次导入产生重复 handler；可选控制台 handler
-使用统一时间、级别、模块名和颜色格式。``_EncodingSafeStream`` 在系统代码页无法写入中文时退化为
-Unicode 转义，确保故障日志仍可读取和追踪。
-"""
-
+import json
 import logging
 import sys
-from typing import TextIO
+import traceback
+from contextvars import ContextVar
+from datetime import UTC, datetime
 
-import colorlog
-
-
-class _EncodingSafeStream:
-    """让控制台日志在系统编码缺字时退化为可追踪的 Unicode 转义。"""
-
-    def __init__(self, stream: TextIO) -> None:
-        self._stream = stream
-
-    def write(self, value: str) -> int:
-        encoding = self._stream.encoding
-        if encoding:
-            value = value.encode(encoding, errors="backslashreplace").decode(encoding)
-        return self._stream.write(value)
-
-    def flush(self) -> None:
-        self._stream.flush()
+request_id: ContextVar[str | None] = ContextVar("request_id", default=None)
+_owned_loggers: set[str] = set()
+_safe_fields = ("http_method", "http_route", "status_class", "duration_seconds", "dependency")
 
 
-def setup_logger(
-    name: str,
-    level: str = "DEBUG",
-    console: bool = True,
-) -> logging.Logger:
-    """配置并返回 Logger；同名 Logger 不重复添加 handler。"""
+class SafeJsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        entry: dict[str, object] = {
+            "time": datetime.fromtimestamp(record.created, UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "event": (
+                record.msg if record.name in _owned_loggers and isinstance(record.msg, str)
+                else "Dependency log"
+            ),
+        }
+        if identity := request_id.get():
+            entry["request_id"] = identity
+        if record.name in _owned_loggers:
+            if isinstance(record.args, tuple) and record.args and all(
+                type(value) in (int, float, bool) for value in record.args
+            ):
+                entry["event"] = record.getMessage()
+            for field in _safe_fields:
+                if (value := getattr(record, field, None)) is not None:
+                    entry[field] = value
+        if record.exc_info is not None:
+            error_type, _, stack = record.exc_info
+            if error_type is not None:
+                entry["exception_type"] = error_type.__name__
+                entry["frames"] = [
+                    {"function": frame.name, "line": frame.lineno}
+                    for frame in traceback.extract_tb(stack, limit=-8)
+                ]
+        return json.dumps(entry, ensure_ascii=True, separators=(",", ":"))
 
+
+def configure_server_logging() -> None:
+    """Route server/dependency warnings through the same safe formatter."""
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(SafeJsonFormatter())
+    logging.basicConfig(level=logging.WARNING, handlers=[handler], force=True)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.propagate = True
+    logging.getLogger("uvicorn.access").disabled = True
+
+
+def setup_logger(name: str, level: str = "INFO", console: bool = True) -> logging.Logger:
+    """Only project call sites supply event names. Never format record arguments."""
     logger = logging.getLogger(name)
+    _owned_loggers.add(name)
     logger.setLevel(level)
-    # 已配置的同名 Logger 直接复用，避免重复输出。
-    if logger.handlers:
-        return logger
-
-    # 控制台只负责颜色和统一格式，日志正文由各业务模块使用中文。
-    if console:
-        formatter = colorlog.ColoredFormatter(
-            fmt="%(log_color)s%(asctime)s | %(levelname)-8s | %(name)s | %(message)s%(reset)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-            log_colors={
-                "DEBUG": "cyan",
-                "INFO": "blue",
-                "WARNING": "yellow",
-                "ERROR": "red",
-                "CRITICAL": "red,bg_white",
-            },
-            reset=True,
-        )
-        handler = colorlog.StreamHandler(_EncodingSafeStream(sys.stdout))
-        handler.setLevel(level)
-        handler.setFormatter(formatter)
+    logger.propagate = False
+    if console and not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(SafeJsonFormatter())
         logger.addHandler(handler)
-
     return logger
-
-
-if __name__ == "__main__":
-    setup_logger(__name__).info("日志组件测试成功")

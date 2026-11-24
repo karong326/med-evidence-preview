@@ -89,13 +89,9 @@ def rerank(
 
     # 日志：
     logger.info(
-        "[Cross-Encoder 重排序] 问题=%s，候选=%d，最终证据=%d，"
-        "模型加载=%.2f秒，推理=%.2f秒，总耗时=%.2f秒",
-        normalized_query,
+        "Reranking completed: candidates=%d evidence=%d load=%.2fs inference=%.2fs total=%.2fs",
         len(candidates),
-
-        len(evidences),  # 最终证据 的数量
-
+        len(evidences),
         model_load_seconds,
         inference_seconds,
         perf_counter() - started_at,
@@ -109,8 +105,3 @@ def retrieve_with_rerank(query: str, *, user_id: UUID | None = None) -> Retrieva
     """执行混合召回后，再返回 Cross-Encoder 最终证据。"""
     candidates = retrieve_hybrid(query, user_id=user_id)
     return rerank(query, candidates.evidences)
-
-
-if __name__ == "__main__":
-    result = retrieve_with_rerank("医院感染暴发应在多长时间内报告？")
-    logger.info("重排序独立测试完成：是否命中=%s，证据数=%d", result.found, len(result.evidences))

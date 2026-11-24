@@ -7,16 +7,13 @@
 
 from pathlib import Path
 
-from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
-from med_evidence_agentic_rag.rag_creation.ingestion import index_document
 from med_evidence_agentic_rag.rag_creation.loader import DocumentLoader
-from med_evidence_agentic_rag.rag_retrieval.bm25 import invalidate_bm25_index
-from med_evidence_agentic_rag.utils.config import PROJECT_ROOT
+from med_evidence_agentic_rag.utils.config import DATA_ROOT
 from med_evidence_agentic_rag.utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-BASE_CORPUS_DIRECTORY = PROJECT_ROOT / "data" / "raw"
+BASE_CORPUS_DIRECTORY = DATA_ROOT / "raw"
 SUPPORTED_SUFFIXES = DocumentLoader.MINERU_SUFFIXES | DocumentLoader.TEXT_SUFFIXES
 
 
@@ -34,12 +31,22 @@ def discover_base_documents(base_directory: str | Path = BASE_CORPUS_DIRECTORY) 
         if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
     )
     documents = sorted(paths, key=lambda path: str(path).lower())
-    logger.info("基础语料的发现和检查已完成：目录=%s，基础知识文档个数=%d", root, len(documents))
+    logger.info("Base documents discovered: count=%d", len(documents))
     return documents
 
 
 def index_base_corpus(base_directory: str | Path = BASE_CORPUS_DIRECTORY) -> dict[str, int]:
     """顺序处理基础语料；单份文件失败不会中断后续文件。"""
+    from med_evidence_agentic_rag.services.coordination import local_guards
+
+    with local_guards.local_scope(("index-owner", "maintenance"), exclusive=True):
+        return _index_base_corpus(base_directory)
+
+
+def _index_base_corpus(base_directory: str | Path) -> dict[str, int]:
+    from med_evidence_agentic_rag.models_and_database.chroma import vectorstore
+    from med_evidence_agentic_rag.rag_creation.ingestion import index_document
+    from med_evidence_agentic_rag.rag_retrieval.bm25 import invalidate_bm25_index
 
     documents = discover_base_documents(base_directory)
 
@@ -61,13 +68,13 @@ def index_base_corpus(base_directory: str | Path = BASE_CORPUS_DIRECTORY) -> dic
             )
         except Exception:
             summary["failed"] += 1
-            logger.exception("基础语料入库失败：%s", file_path)
+            logger.exception("Base document ingestion failed")
             continue
 
         summary["indexed"] += 1
         summary["chunks"] += chunk_count
 
-    logger.info("基础语料初始化完成：%s", summary)
+    logger.info("Base corpus initialization finished")
     return summary
 
 

@@ -59,14 +59,9 @@ def rewrite_queries(question: str) -> str:
             raise ValueError("查询规划结果为空")
         plan = plan.model_copy(update={"queries": queries, "fallback": False})
 
-    except Exception as error:
-        logger.warning("查询规划失败，保留原问题检索：%s", error)
+    except Exception:
+        logger.warning("Query planning failed; using the original question")
         plan = QueryPlan(mode="single", queries=[normalized_question], fallback=True)
 
-    logger.info(
-        "查询规划完成：模式=%s，查询数=%d，是否回退=%s",
-        plan.mode,
-        len(plan.queries),
-        plan.fallback,
-    )
+    logger.info("Query planning completed: queries=%d", len(plan.queries))
     return json.dumps(plan.model_dump(), ensure_ascii=False)

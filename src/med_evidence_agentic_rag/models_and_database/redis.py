@@ -131,13 +131,13 @@ async def save_verification_code(email: str, code: str) -> None:
         pipeline.setex(_code_key(email), VERIFICATION_CODE_TTL_SECONDS, code)
         pipeline.delete(f"{EMAIL_CODE_FAILURE_PREFIX}{email}")
         await pipeline.execute()
-    logger.info("邮箱验证码已保存：%s", email)
+    logger.info("Verification code stored")
 
 
 async def get_verification_code(email: str) -> str | None:
     """读取尚未过期的邮箱验证码。"""
     code = await redis_client.get(_code_key(email))
-    logger.info("已查询邮箱验证码：%s，是否存在：%s", email, code is not None)
+    logger.info("Verification code looked up")
     return code
 
 
@@ -159,7 +159,7 @@ async def verify_email_code(email: str, code: str) -> str:
 async def delete_verification_code(email: str) -> None:
     """删除邮箱验证码，使其不能再次使用。"""
     await redis_client.delete(_code_key(email))
-    logger.info("邮箱验证码已删除：%s", email)
+    logger.info("Verification code deleted")
 
 
 async def test_connection() -> None:
